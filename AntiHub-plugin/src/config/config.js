@@ -27,23 +27,41 @@ const defaultConfig = {
     endpoints: API_ENDPOINTS
   },
   defaults: { temperature: 1, top_p: 0.85, top_k: 50, max_tokens: 8096 },
-  security: { maxRequestSize: '50mb', apiKey: null },
+  security: { maxRequestSize: '50mb', adminApiKey: null },
   systemInstruction: ''
 };
 
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mergeConfigSection(base, override) {
+  return { ...base, ...(isPlainObject(override) ? override : {}) };
+}
+
 let config;
 try {
-  config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-  // 确保 api.endpoints 存在
-  if (!config.api) {
-    config.api = defaultConfig.api;
-  } else if (!config.api.endpoints) {
-    config.api.endpoints = API_ENDPOINTS;
+  const userConfig = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
+
+  const mergedApi = mergeConfigSection(defaultConfig.api, userConfig.api);
+  if (!Array.isArray(mergedApi.endpoints) || mergedApi.endpoints.length === 0) {
+    mergedApi.endpoints = API_ENDPOINTS;
   }
+
+  config = {
+    ...defaultConfig,
+    ...userConfig,
+    server: mergeConfigSection(defaultConfig.server, userConfig.server),
+    api: mergedApi,
+    defaults: mergeConfigSection(defaultConfig.defaults, userConfig.defaults),
+    security: mergeConfigSection(defaultConfig.security, userConfig.security)
+  };
+
   log.info('✓ 配置文件加载成功');
-} catch {
+} catch (error) {
   config = defaultConfig;
-  log.warn('⚠ 配置文件未找到，使用默认配置');
+  const errorHint = error?.code === 'ENOENT' ? '配置文件未找到' : `配置文件加载失败: ${error?.message || error}`;
+  log.warn(`⚠ ${errorHint}，使用默认配置`);
 }
 
 /**

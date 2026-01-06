@@ -84,6 +84,12 @@ else
   "oauth": {
     "callbackUrl": "${OAUTH_CALLBACK_URL:-http://localhost:8045/api/oauth/callback}"
   },
+  "defaults": {
+    "temperature": 1,
+    "top_p": 0.85,
+    "top_k": 50,
+    "max_tokens": 8096
+  },
   "security": {
     "maxRequestSize": "50mb",
     "adminApiKey": "${ADMIN_API_KEY:-sk-admin-default-key}"
