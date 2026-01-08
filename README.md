@@ -1,5 +1,10 @@
 ﻿# AntiHub-ALL Docker 部署
 
+原项目地址：
+- https://github.com/AntiHub-Project/AntiHub
+- https://github.com/AntiHub-Project/Antigv-plugin
+- https://github.com/AntiHub-Project/Backend
+
 这个仓库把 `AntiHub`（前端）、`AntiHub-Backend`（后端）、`AntiHub-plugin`（插件服务）统一成一套 `docker compose` 部署。
 
 目标很简单：三者之间的内部地址/端口都已经预置好，你只需要配置外部依赖（现成的 PostgreSQL）和你自己的密钥。
@@ -33,8 +38,6 @@ docker compose up -d
 
 - Username/password: set `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `.env`, restart backend once, then visit `/auth` to sign in
 
-Note: In shared Docker networks (e.g. 1Panel), prefer `http://antihub-backend:8000` as the in-container backend address.
-
 - 直连：`http://localhost:3000`（或你在 `.env` 里设置的 `WEB_PORT`）
 - 或者用你自己的反代把域名转发到前端端口
 
@@ -55,3 +58,9 @@ docker compose run --rm backend python generate_encryption_key.py
 - `ghcr.io/<owner>/antihub-plugin`
 
 默认分支推 `latest`，同时推 `sha` 标签；打 `v*` tag 会推对应 tag。
+
+## 鸣谢
+
+- [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) - 提供AN渠道的Token导入代码
+- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) - 提供了AN渠道的429修复
+- [KiroGate](https://github.com/aliom-v/KiroGate) - Kiro渠道的Token导入、思考支持
