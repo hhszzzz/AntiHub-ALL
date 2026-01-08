@@ -171,7 +171,7 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            Antigravity {stats?.totalAccounts - (stats?.totalKiroAccounts || 0)} | Kiro {stats?.totalKiroAccounts || 0}
+            Antigravity {(stats?.totalAccounts || 0) - (stats?.totalKiroAccounts || 0)} | Kiro {stats?.totalKiroAccounts || 0}
           </div>
           <div className="text-muted-foreground">
             双渠道账户合计
