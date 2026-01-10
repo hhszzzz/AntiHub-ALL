@@ -184,7 +184,7 @@ export function SectionCards() {
         <CardHeader>
           <CardDescription>24小时配额消耗</CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {Number(stats?.consumedLast24h || 0).toFixed(2)}
+            {(parseFloat(String(stats?.consumedLast24h)) || 0).toFixed(2)}
           </CardTitle>
           <CardAction>
             <Badge variant="outline">
@@ -194,7 +194,7 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            总消耗: {Number(stats?.totalQuotaConsumed || 0).toFixed(2)}
+            总消耗: {(parseFloat(String(stats?.totalQuotaConsumed)) || 0).toFixed(2)}
           </div>
           <div className="text-muted-foreground">全部渠道配额消耗合计</div>
         </CardFooter>
