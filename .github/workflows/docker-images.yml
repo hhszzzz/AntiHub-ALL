@@ -109,9 +109,7 @@ jobs:
           echo "Building for macOS arm64..."
           GOOS=darwin GOARCH=arm64 go build -v -ldflags="$LDFLAGS" -o ../AntiHub/public/downloads/antihook-darwin-arm64 .
 
-          # Linux amd64
-          echo "Building for Linux amd64..."
-          GOOS=linux GOARCH=amd64 go build -v -ldflags="$LDFLAGS" -o ../AntiHub/public/downloads/antihook-linux-amd64 .
+          # 注意：Linux 暂不支持，因为 AntiHook 的 registry 包没有 Linux 实现
 
           echo "All builds completed!"
           ls -lh ../AntiHub/public/downloads/

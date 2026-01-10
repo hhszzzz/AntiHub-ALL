@@ -738,7 +738,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
 
   /**
    * 自动检测用户平台并下载对应的 AntiHook 二进制文件
-   * 支持：Windows、macOS (Intel/ARM)、Linux
+   * 支持：Windows、macOS (Intel/ARM)
+   * Linux 暂不支持（AntiHook 没有 Linux 实现）
    * 如果无法检测则弹出提示让用户手动选择
    */
   const handleDownloadAntiHook = () => {
@@ -767,14 +768,19 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         downloadPath = '/downloads/antihook-darwin-arm64';
         platformName = 'macOS (Apple Silicon)';
       } else {
-        // 无法准确检测，默认下载 Intel 版本，或者可以弹窗让用户选择
-        // 这里我们默认下载 arm64，因为现在大多数新 Mac 都是 Apple Silicon
+        // 无法准确检测，默认下载 arm64，因为现在大多数新 Mac 都是 Apple Silicon
         downloadPath = '/downloads/antihook-darwin-arm64';
         platformName = 'macOS';
       }
     } else if (userAgent.includes('linux') || platform.includes('linux')) {
-      downloadPath = '/downloads/antihook-linux-amd64';
-      platformName = 'Linux';
+      // Linux 暂不支持
+      toasterRef.current?.show({
+        title: 'Linux 暂不支持',
+        message: 'AntiHook 目前仅支持 Windows 和 macOS',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
     }
 
     if (downloadPath) {
