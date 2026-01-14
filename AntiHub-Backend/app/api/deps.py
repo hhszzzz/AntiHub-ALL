@@ -258,6 +258,7 @@ async def get_user_from_api_key(
                     last_login_at=datetime.fromisoformat(cached_data["last_login_at"]) if cached_data.get("last_login_at") else None
                 )
                 user._config_type = cached_data.get("_config_type")
+                user._api_key_id = cached_data.get("_api_key_id")
                 
                 # 后台更新 last_used（不阻塞）
                 background_tasks.add_task(update_api_key_last_used_background, api_key)
@@ -302,6 +303,7 @@ async def get_user_from_api_key(
         
         # 将config_type附加到user对象上，供路由使用
         user._config_type = key_record.config_type
+        user._api_key_id = key_record.id
         
         # 3. 存入缓存 - 包含所有必需字段
         try:
@@ -315,7 +317,8 @@ async def get_user_from_api_key(
                 "created_at": user.created_at.isoformat() if user.created_at else None,
                 "avatar_url": user.avatar_url,
                 "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
-                "_config_type": key_record.config_type
+                "_config_type": key_record.config_type,
+                "_api_key_id": key_record.id,
             }
             await redis.set_json(cache_key, user_data, expire=API_KEY_AUTH_CACHE_TTL)
             logger.debug(f"API key 认证结果已缓存: {api_key[:10]}..., TTL={API_KEY_AUTH_CACHE_TTL}s")

@@ -825,6 +825,60 @@ export interface QuotaConsumption {
   consumed_at: string;
 }
 
+// ==================== 请求用量统计（本系统日志） ====================
+
+export interface RequestUsageStats {
+  range: {
+    start_date: string | null;
+    end_date: string | null;
+  };
+  config_type: string | null;
+  total_requests: number;
+  success_requests: number;
+  failed_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  avg_duration_ms: number;
+  by_config_type: Record<string, {
+    total_requests: number;
+    success_requests: number;
+    failed_requests: number;
+    total_tokens: number;
+  }>;
+  by_model: Record<string, {
+    total_requests: number;
+    total_tokens: number;
+  }>;
+}
+
+export interface RequestUsageLogItem {
+  id: number;
+  endpoint: string;
+  method: string;
+  model_name: string | null;
+  config_type: string | null;
+  stream: boolean;
+  success: boolean;
+  status_code: number | null;
+  error_message: string | null;
+  quota_consumed: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+  created_at: string | null;
+}
+
+export interface RequestUsageLogsResponse {
+  logs: RequestUsageLogItem[];
+  pagination: {
+    limit: number;
+    offset: number;
+    total: number;
+  };
+}
+
 /**
  * 获取用户配额池
  */
@@ -852,6 +906,50 @@ export async function getQuotaConsumption(params?: {
   const url = `${API_BASE_URL}/api/plugin-api/quotas/consumption${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
   
   const result = await fetchWithAuth<{ success: boolean; data: QuotaConsumption[] }>(url, { method: 'GET' });
+  return result.data;
+}
+
+/**
+ * 获取请求用量统计（聚合）
+ */
+export async function getRequestUsageStats(params?: {
+  start_date?: string;
+  end_date?: string;
+  config_type?: ApiType;
+}): Promise<RequestUsageStats> {
+  const queryParams = new URLSearchParams();
+  if (params?.start_date) queryParams.append('start_date', params.start_date);
+  if (params?.end_date) queryParams.append('end_date', params.end_date);
+  if (params?.config_type) queryParams.append('config_type', params.config_type);
+
+  const url = `${API_BASE_URL}/api/usage/requests/stats${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+  const result = await fetchWithAuth<{ success: boolean; data: RequestUsageStats }>(url, { method: 'GET' });
+  return result.data;
+}
+
+/**
+ * 获取请求用量日志（分页）
+ */
+export async function getRequestUsageLogs(params?: {
+  limit?: number;
+  offset?: number;
+  start_date?: string;
+  end_date?: string;
+  config_type?: ApiType;
+  success?: boolean;
+  model_name?: string;
+}): Promise<RequestUsageLogsResponse> {
+  const queryParams = new URLSearchParams();
+  if (params?.limit !== undefined) queryParams.append('limit', params.limit.toString());
+  if (params?.offset !== undefined) queryParams.append('offset', params.offset.toString());
+  if (params?.start_date) queryParams.append('start_date', params.start_date);
+  if (params?.end_date) queryParams.append('end_date', params.end_date);
+  if (params?.config_type) queryParams.append('config_type', params.config_type);
+  if (params?.success !== undefined) queryParams.append('success', params.success ? 'true' : 'false');
+  if (params?.model_name) queryParams.append('model_name', params.model_name);
+
+  const url = `${API_BASE_URL}/api/usage/requests/logs${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+  const result = await fetchWithAuth<{ success: boolean; data: RequestUsageLogsResponse }>(url, { method: 'GET' });
   return result.data;
 }
 

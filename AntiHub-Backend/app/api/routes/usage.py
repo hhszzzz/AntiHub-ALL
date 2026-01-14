@@ -3,11 +3,15 @@
 显示用户的使用记录和剩余配额
 """
 from typing import Optional
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_plugin_api_service
+from app.api.deps import get_current_user, get_plugin_api_service, get_db_session
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
+from app.repositories.usage_log_repository import UsageLogRepository
+from app.models.usage_log import UsageLog
 
 
 router = APIRouter(prefix="/usage", tags=["用量统计"])
@@ -293,4 +297,152 @@ async def get_shared_pool_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取共享池统计失败"
+        )
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    # 支持 2026-01-14T12:00:00Z
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception as e:
+        raise ValueError("start_date/end_date 必须是 ISO8601 格式") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _usage_log_to_dict(log: UsageLog) -> dict:
+    return {
+        "id": log.id,
+        "endpoint": log.endpoint,
+        "method": log.method,
+        "model_name": log.model_name,
+        "config_type": log.config_type,
+        "stream": bool(log.stream),
+        "success": bool(log.success),
+        "status_code": log.status_code,
+        "error_message": log.error_message,
+        "quota_consumed": float(log.quota_consumed or 0.0),
+        "input_tokens": int(log.input_tokens or 0),
+        "output_tokens": int(log.output_tokens or 0),
+        "total_tokens": int(log.total_tokens or 0),
+        "duration_ms": int(log.duration_ms or 0),
+        "created_at": log.created_at.isoformat() if log.created_at else None,
+    }
+
+
+@router.get(
+    "/requests/logs",
+    summary="获取请求用量日志",
+    description="返回本系统记录的请求日志（成功/失败都包含）。用于前端用量统计展示。",
+)
+async def get_request_usage_logs(
+    limit: int = Query(50, description="每页数量（1-200）"),
+    offset: int = Query(0, description="偏移量（>=0）"),
+    start_date: Optional[str] = Query(None, description="开始时间（ISO8601）"),
+    end_date: Optional[str] = Query(None, description="结束时间（ISO8601）"),
+    config_type: Optional[str] = Query(None, description="antigravity/kiro/qwen"),
+    success: Optional[bool] = Query(None, description="true=只看成功，false=只看失败，不传=全部"),
+    model_name: Optional[str] = Query(None, description="模型名过滤"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    try:
+        if limit < 1 or limit > 200:
+            raise ValueError("limit 必须在 1-200 之间")
+        if offset < 0:
+            raise ValueError("offset 不能小于 0")
+        if config_type and config_type not in ("antigravity", "kiro", "qwen"):
+            raise ValueError("config_type 必须是 antigravity / kiro / qwen")
+
+        start_at = _parse_iso_datetime(start_date)
+        end_at = _parse_iso_datetime(end_date)
+
+        repo = UsageLogRepository(db)
+        total = await repo.count_logs(
+            user_id=current_user.id,
+            start_at=start_at,
+            end_at=end_at,
+            config_type=config_type,
+            success=success,
+            model_name=model_name,
+        )
+        logs = await repo.list_logs(
+            user_id=current_user.id,
+            limit=limit,
+            offset=offset,
+            start_at=start_at,
+            end_at=end_at,
+            config_type=config_type,
+            success=success,
+            model_name=model_name,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "logs": [_usage_log_to_dict(l) for l in logs],
+                "pagination": {"limit": limit, "offset": offset, "total": total},
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取请求用量日志失败",
+        )
+
+
+@router.get(
+    "/requests/stats",
+    summary="获取请求用量统计",
+    description="按时间范围聚合统计请求次数、token 用量、成功/失败数。",
+)
+async def get_request_usage_stats(
+    start_date: Optional[str] = Query(None, description="开始时间（ISO8601）"),
+    end_date: Optional[str] = Query(None, description="结束时间（ISO8601）"),
+    config_type: Optional[str] = Query(None, description="antigravity/kiro/qwen"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    try:
+        if config_type and config_type not in ("antigravity", "kiro", "qwen"):
+            raise ValueError("config_type 必须是 antigravity / kiro / qwen")
+
+        start_at = _parse_iso_datetime(start_date)
+        end_at = _parse_iso_datetime(end_date)
+
+        repo = UsageLogRepository(db)
+        stats_data = await repo.get_stats(
+            user_id=current_user.id,
+            start_at=start_at,
+            end_at=end_at,
+            config_type=config_type,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "range": {
+                    "start_date": start_at.isoformat() if start_at else None,
+                    "end_date": end_at.isoformat() if end_at else None,
+                },
+                "config_type": config_type,
+                **stats_data,
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取请求用量统计失败",
         )

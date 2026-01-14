@@ -7,11 +7,15 @@ import {
   getKiroConsumptionStats,
   getKiroAccounts,
   getKiroAccountConsumption,
+  getRequestUsageStats,
+  getRequestUsageLogs,
   type UserQuotaItem,
   type QuotaConsumption,
   type KiroConsumptionStats,
   type KiroAccount,
-  type KiroConsumptionLog
+  type KiroConsumptionLog,
+  type RequestUsageStats,
+  type RequestUsageLogItem,
 } from '@/lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -40,7 +44,7 @@ import {
   PaginationEllipsis,
 } from '@/components/ui/pagination';
 import { MorphingSquare } from '@/components/ui/morphing-square';
-import { Gemini, Claude, OpenAI } from '@lobehub/icons';
+import { Gemini, Claude, OpenAI, Qwen } from '@lobehub/icons';
 import Toaster, { ToasterRef } from '@/components/ui/toast';
 
 export default function AnalyticsPage() {
@@ -51,17 +55,21 @@ export default function AnalyticsPage() {
   const [kiroStats, setKiroStats] = useState<KiroConsumptionStats | null>(null);
   const [kiroAccounts, setKiroAccounts] = useState<KiroAccount[]>([]);
   const [kiroLogs, setKiroLogs] = useState<KiroConsumptionLog[]>([]);
+  const [qwenStats, setQwenStats] = useState<RequestUsageStats | null>(null);
+  const [qwenLogs, setQwenLogs] = useState<RequestUsageLogItem[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [antigravityCurrentPage, setAntigravityCurrentPage] = useState(1); // Antigravity 分页
+  const [qwenCurrentPage, setQwenCurrentPage] = useState(1); // Qwen 分页（本系统请求日志）
   const [totalRecords, setTotalRecords] = useState(0);
   const [antigravityTotalRecords, setAntigravityTotalRecords] = useState(0); // Antigravity 总记录数
-  const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro'>('antigravity');
+  const [qwenTotalRecords, setQwenTotalRecords] = useState(0);
+  const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro' | 'qwen'>('antigravity');
   const [isLoading, setIsLoading] = useState(true);
   const pageSize = 50;
 
   useEffect(() => {
     loadData();
-  }, [activeTab, currentPage, antigravityCurrentPage]);
+  }, [activeTab, currentPage, antigravityCurrentPage, qwenCurrentPage]);
 
   const loadData = async () => {
     setIsLoading(true);
@@ -89,6 +97,15 @@ export default function AnalyticsPage() {
 
         // 加载所有账号的消费记录并聚合
         await loadKiroLogs(accountsData);
+      } else if (activeTab === 'qwen') {
+        const offset = (qwenCurrentPage - 1) * pageSize;
+        const [statsData, logsData] = await Promise.all([
+          getRequestUsageStats({ config_type: 'qwen' }),
+          getRequestUsageLogs({ config_type: 'qwen', limit: pageSize, offset }),
+        ]);
+        setQwenStats(statsData);
+        setQwenLogs(logsData.logs);
+        setQwenTotalRecords(logsData.pagination.total);
       }
     } catch (err) {
       toasterRef.current?.show({
@@ -154,8 +171,13 @@ export default function AnalyticsPage() {
     setConsumptions(allConsumptions.slice(startIndex, endIndex));
   };
 
+  const handleQwenPageChange = (page: number) => {
+    setQwenCurrentPage(page);
+  };
+
   const totalPages = Math.ceil(totalRecords / pageSize);
   const antigravityTotalPages = Math.ceil(antigravityTotalRecords / pageSize);
+  const qwenTotalPages = Math.ceil(qwenTotalRecords / pageSize);
 
   const MODEL_ORDER: string[] = [
     'gemini-2.5-flash',
@@ -225,7 +247,12 @@ export default function AnalyticsPage() {
     }
   };
 
-  if (isLoading && !kiroLogs.length) {
+  const isFirstLoadForTab =
+    (activeTab === 'antigravity' && quotas.length === 0 && allConsumptions.length === 0) ||
+    (activeTab === 'kiro' && kiroLogs.length === 0 && !kiroStats) ||
+    (activeTab === 'qwen' && qwenLogs.length === 0 && !qwenStats);
+
+  if (isLoading && isFirstLoadForTab) {
     return (
       <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
         <div className="px-4 lg:px-6">
@@ -243,7 +270,7 @@ export default function AnalyticsPage() {
         {/* 页面标题和配置选择 */}
         <div className="flex items-center justify-between mb-6">
           <div></div>
-          <Select value={activeTab} onValueChange={(value: 'antigravity' | 'kiro') => setActiveTab(value)}>
+          <Select value={activeTab} onValueChange={(value: 'antigravity' | 'kiro' | 'qwen') => setActiveTab(value)}>
             <SelectTrigger className="w-[160px] h-9">
               <SelectValue>
                 {activeTab === 'antigravity' ? (
@@ -251,10 +278,15 @@ export default function AnalyticsPage() {
                     <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
                     Antigravity
                   </span>
-                ) : (
+                ) : activeTab === 'kiro' ? (
                   <span className="flex items-center gap-2">
                     <img src="/kiro.png" alt="" className="size-4 rounded" />
                     Kiro
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2">
+                    <Qwen className="size-4" />
+                    Qwen
                   </span>
                 )}
               </SelectValue>
@@ -270,6 +302,12 @@ export default function AnalyticsPage() {
                 <span className="flex items-center gap-2">
                   <img src="/kiro.png" alt="" className="size-4 rounded" />
                   Kiro
+                </span>
+              </SelectItem>
+              <SelectItem value="qwen">
+                <span className="flex items-center gap-2">
+                  <Qwen className="size-4" />
+                  Qwen
                 </span>
               </SelectItem>
             </SelectContent>
@@ -452,6 +490,161 @@ export default function AnalyticsPage() {
               )}
             </CardContent>
           </Card>
+        )}
+
+        {/* Qwen 请求统计（本系统记录） */}
+        {activeTab === 'qwen' && (
+          <>
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle>请求统计</CardTitle>
+                <CardDescription>统计本系统记录的 Qwen 调用（成功与失败都会记录）</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {qwenStats ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">总请求数</p>
+                      <p className="text-2xl font-bold">{(qwenStats.total_requests || 0).toLocaleString()}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">总 Tokens</p>
+                      <p className="text-2xl font-bold">{(qwenStats.total_tokens || 0).toLocaleString()}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">成功 / 失败</p>
+                      <p className="text-2xl font-bold">
+                        {(qwenStats.success_requests || 0).toLocaleString()} / {(qwenStats.failed_requests || 0).toLocaleString()}
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">平均耗时</p>
+                      <p className="text-2xl font-bold">{Math.round(qwenStats.avg_duration_ms || 0).toLocaleString()}ms</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <p className="text-sm">暂无统计数据</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>使用记录</CardTitle>
+                <CardDescription>共 {qwenTotalRecords} 条使用记录</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {qwenLogs.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <p className="text-lg mb-2">暂无使用记录</p>
+                    <p className="text-sm">先用 Qwen 发起一次对话吧！</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="overflow-x-auto -mx-6 px-6 md:mx-0 md:px-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="min-w-[90px]">状态</TableHead>
+                            <TableHead className="min-w-[160px]">模型</TableHead>
+                            <TableHead className="min-w-[120px]">Tokens</TableHead>
+                            <TableHead className="min-w-[100px]">耗时</TableHead>
+                            <TableHead className="min-w-[160px]">时间</TableHead>
+                            <TableHead className="min-w-[240px]">错误</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {qwenLogs.map((log) => (
+                            <TableRow key={log.id}>
+                              <TableCell>
+                                <Badge variant={log.success ? 'secondary' : 'destructive'}>
+                                  {log.success ? '成功' : '失败'}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant="outline" className="whitespace-nowrap">
+                                  {getModelDisplayName(log.model_name || 'unknown')}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="font-mono text-sm whitespace-nowrap">
+                                {(log.total_tokens || 0).toLocaleString()}
+                              </TableCell>
+                              <TableCell className="font-mono text-sm whitespace-nowrap">
+                                {(log.duration_ms || 0).toLocaleString()}ms
+                              </TableCell>
+                              <TableCell className="text-sm whitespace-nowrap">
+                                {log.created_at ? new Date(log.created_at).toLocaleString('zh-CN') : '-'}
+                              </TableCell>
+                              <TableCell className="text-sm">
+                                <div className="max-w-[360px] truncate" title={log.error_message || ''}>
+                                  {log.error_message || '-'}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+
+                    {qwenTotalPages > 1 && (
+                      <div className="mt-4 flex justify-center">
+                        <Pagination>
+                          <PaginationContent>
+                            <PaginationItem>
+                              <PaginationPrevious
+                                onClick={() => qwenCurrentPage > 1 && handleQwenPageChange(qwenCurrentPage - 1)}
+                                className={qwenCurrentPage === 1 ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                              />
+                            </PaginationItem>
+
+                            {Array.from({ length: Math.min(qwenTotalPages, 5) }, (_, i) => {
+                              let pageNum;
+                              if (qwenTotalPages <= 5) {
+                                pageNum = i + 1;
+                              } else if (qwenCurrentPage <= 3) {
+                                pageNum = i + 1;
+                              } else if (qwenCurrentPage >= qwenTotalPages - 2) {
+                                pageNum = qwenTotalPages - 4 + i;
+                              } else {
+                                pageNum = qwenCurrentPage - 2 + i;
+                              }
+
+                              return (
+                                <PaginationItem key={pageNum}>
+                                  <PaginationLink
+                                    onClick={() => handleQwenPageChange(pageNum)}
+                                    isActive={qwenCurrentPage === pageNum}
+                                    className="cursor-pointer"
+                                  >
+                                    {pageNum}
+                                  </PaginationLink>
+                                </PaginationItem>
+                              );
+                            })}
+
+                            {qwenTotalPages > 5 && qwenCurrentPage < qwenTotalPages - 2 && (
+                              <PaginationItem>
+                                <PaginationEllipsis />
+                              </PaginationItem>
+                            )}
+
+                            <PaginationItem>
+                              <PaginationNext
+                                onClick={() => qwenCurrentPage < qwenTotalPages && handleQwenPageChange(qwenCurrentPage + 1)}
+                                className={qwenCurrentPage === qwenTotalPages ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                              />
+                            </PaginationItem>
+                          </PaginationContent>
+                        </Pagination>
+                      </div>
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          </>
         )}
 
         {/* Kiro 消费统计 */}

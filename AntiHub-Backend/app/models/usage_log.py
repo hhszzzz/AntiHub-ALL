@@ -2,7 +2,7 @@
 使用记录模型
 记录用户的API调用，用于统计
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -22,10 +22,25 @@ class UsageLog(Base):
     endpoint = Column(String(255), nullable=False)  # 调用的端点
     method = Column(String(10), nullable=False)  # HTTP方法
     model_name = Column(String(100), nullable=True)  # 使用的模型
+    config_type = Column(String(20), nullable=True, index=True)  # antigravity / kiro / qwen
+    stream = Column(Boolean, default=False, nullable=False)  # 是否为流式请求
     
     # 配额消耗
     quota_consumed = Column(Float, default=0.0, nullable=False)  # 消耗的配额
-    
+
+    # Token 用量（OpenAI/兼容格式）
+    input_tokens = Column(Integer, default=0, nullable=False)  # prompt_tokens / input_tokens
+    output_tokens = Column(Integer, default=0, nullable=False)  # completion_tokens / output_tokens
+    total_tokens = Column(Integer, default=0, nullable=False)
+
+    # 请求结果
+    success = Column(Boolean, default=True, nullable=False)  # 成功/失败都要记录
+    status_code = Column(Integer, nullable=True)  # 上游/处理结果状态码（流式可能为上游code）
+    error_message = Column(Text, nullable=True)  # 失败原因（截断保存）
+
+    # 性能
+    duration_ms = Column(Integer, default=0, nullable=False)
+
     # 时间戳
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     

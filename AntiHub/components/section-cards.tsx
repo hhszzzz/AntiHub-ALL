@@ -17,6 +17,7 @@ import {
   getKiroAccounts,
   getKiroConsumptionStats,
   getKiroAccountConsumption,
+  getRequestUsageStats,
   getAccounts,
   getQwenAccounts,
 } from "@/lib/api"
@@ -41,10 +42,12 @@ export function SectionCards() {
         const now = new Date();
         const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-        const [antigravityAccounts, antigravityConsumption, qwenAccounts] = await Promise.all([
+        const [antigravityAccounts, antigravityConsumption, qwenAccounts, qwenStats24h, qwenStatsAll] = await Promise.all([
           getAccounts(),
           getQuotaConsumption({ limit: 1000 }),
           getQwenAccounts().catch(() => []),
+          getRequestUsageStats({ start_date: last24h.toISOString(), config_type: 'qwen' }).catch(() => null),
+          getRequestUsageStats({ config_type: 'qwen' }).catch(() => null),
         ]);
 
         // 计算24小时内的消耗
@@ -53,6 +56,9 @@ export function SectionCards() {
         const antigravityCallsLast24h = recentConsumption.length;
         const antigravityTotalQuotaConsumed = antigravityConsumption.reduce((sum, c) => sum + (Number.parseFloat(c.quota_consumed) || 0), 0);
         const antigravityTotalRequests = antigravityConsumption.length;
+
+        const qwenCallsLast24h = qwenStats24h?.total_requests || 0;
+        const qwenTotalRequests = qwenStatsAll?.total_requests || 0;
 
         // 获取 Kiro 数据
         let kiroAccounts: any[] = [];
@@ -99,8 +105,8 @@ export function SectionCards() {
           totalAccounts,
           activeAccounts,
           consumedLast24h: antigravityConsumedLast24h + kiroConsumedLast24h,
-          callsLast24h: antigravityCallsLast24h + kiroCallsLast24h,
-          totalRequests: antigravityTotalRequests + totalKiroRequests,
+          callsLast24h: antigravityCallsLast24h + kiroCallsLast24h + qwenCallsLast24h,
+          totalRequests: antigravityTotalRequests + totalKiroRequests + qwenTotalRequests,
           totalQuotaConsumed: antigravityTotalQuotaConsumed + totalKiroQuotaConsumed,
         });
       } catch (err) {

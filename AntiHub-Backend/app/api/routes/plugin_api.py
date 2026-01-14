@@ -3,6 +3,7 @@ Plug-in API相关的路由
 提供用户管理plug-in API密钥和代理请求的端点
 """
 from typing import Optional
+import time
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 import httpx
@@ -11,6 +12,7 @@ from app.api.deps import get_current_user, get_user_from_api_key, get_plugin_api
 from app.api.deps_flexible import get_user_flexible
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
+from app.services.usage_log_service import UsageLogService, SSEUsageTracker, extract_openai_usage
 from app.schemas.plugin_api import (
     PluginAPIKeyCreate,
     PluginAPIKeyResponse,
@@ -585,55 +587,163 @@ async def get_models(
 )
 async def chat_completions(
     request: ChatCompletionRequest,
+    raw_request: Request,
     current_user: User = Depends(get_user_from_api_key),
     service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """聊天补全"""
+    start_time = time.monotonic()
+    endpoint = raw_request.url.path
+    method = raw_request.method
+    api_key_id = getattr(current_user, "_api_key_id", None)
+    model_name = getattr(request, "model", None)
+
+    config_type = getattr(current_user, "_config_type", None)
+    effective_config_type = config_type or "antigravity"
+
     try:
-        # 获取 config_type（通过 API key 认证时会设置）
-        config_type = getattr(current_user, '_config_type', None)
-        print(f"🔍 [plugin_api.py] Current user ID: {current_user.id}")
-        print(f"🔍 [plugin_api.py] Current user object attributes: {dir(current_user)}")
-        print(f"🔍 [plugin_api.py] Has _config_type: {hasattr(current_user, '_config_type')}")
-        print(f"🔍 [plugin_api.py] Config type value: {config_type}")
-        
-        # 准备额外的请求头
-        extra_headers = {}
+        extra_headers: dict[str, str] = {}
         if config_type:
             extra_headers["X-Account-Type"] = config_type
-        
-        # 如果是流式请求
+
         if request.stream:
+            tracker = SSEUsageTracker()
+
             async def generate():
-                async for chunk in service.proxy_stream_request(
-                    user_id=current_user.id,
-                    method="POST",
-                    path="/v1/chat/completions",
-                    json_data=request.model_dump(),
-                    extra_headers=extra_headers if extra_headers else None
-                ):
-                    yield chunk
-            
-            return StreamingResponse(
-                generate(),
-                media_type="text/event-stream"
-            )
-        else:
-            # 非流式请求
-            result = await service.proxy_request(
-                user_id=current_user.id,
-                method="POST",
-                path="/v1/chat/completions",
-                json_data=request.model_dump(),
-                extra_headers=extra_headers if extra_headers else None
-            )
-            return result
+                try:
+                    async for chunk in service.proxy_stream_request(
+                        user_id=current_user.id,
+                        method="POST",
+                        path="/v1/chat/completions",
+                        json_data=request.model_dump(),
+                        extra_headers=extra_headers if extra_headers else None,
+                    ):
+                        tracker.feed(chunk)
+                        yield chunk
+                except Exception as e:
+                    tracker.success = False
+                    tracker.status_code = tracker.status_code or 500
+                    tracker.error_message = str(e)
+                    raise
+                finally:
+                    tracker.finalize()
+                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                    await UsageLogService.record(
+                        user_id=current_user.id,
+                        api_key_id=api_key_id,
+                        endpoint=endpoint,
+                        method=method,
+                        model_name=model_name,
+                        config_type=effective_config_type,
+                        stream=True,
+                        input_tokens=tracker.input_tokens,
+                        output_tokens=tracker.output_tokens,
+                        total_tokens=tracker.total_tokens,
+                        success=tracker.success,
+                        status_code=tracker.status_code,
+                        error_message=tracker.error_message,
+                        duration_ms=duration_ms,
+                    )
+
+            return StreamingResponse(generate(), media_type="text/event-stream")
+
+        result = await service.proxy_request(
+            user_id=current_user.id,
+            method="POST",
+            path="/v1/chat/completions",
+            json_data=request.model_dump(),
+            extra_headers=extra_headers if extra_headers else None,
+        )
+
+        in_tok, out_tok, total_tok = extract_openai_usage(result)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            total_tokens=total_tok,
+            success=True,
+            status_code=200,
+            duration_ms=duration_ms,
+        )
+        return result
     except ValueError as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=bool(request.stream),
+            success=False,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_message=str(e),
+            duration_ms=duration_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+    except httpx.HTTPStatusError as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        upstream_response = getattr(e, "response_data", None)
+        if upstream_response is None:
+            try:
+                upstream_response = e.response.json()
+            except Exception:
+                upstream_response = {"error": e.response.text}
+
+        error_message = None
+        if isinstance(upstream_response, dict):
+            error_message = (
+                upstream_response.get("detail")
+                or upstream_response.get("error")
+                or upstream_response.get("message")
+                or str(upstream_response)
+            )
+        else:
+            error_message = str(upstream_response)
+
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=bool(request.stream),
+            success=False,
+            status_code=e.response.status_code,
+            error_message=error_message,
+            duration_ms=duration_ms,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="聊天补全失败",
+        )
     except Exception as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=bool(request.stream),
+            success=False,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error_message=str(e),
+            duration_ms=duration_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"聊天补全失败"
