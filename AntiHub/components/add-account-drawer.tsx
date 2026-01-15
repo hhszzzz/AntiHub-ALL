@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   createKiroAccount,
+  getKiroAccountBalance,
   getOAuthAuthorizeUrl,
   submitOAuthCallback,
   getQwenOAuthAuthorizeUrl,
@@ -37,10 +38,21 @@ interface AddAccountDrawerProps {
   onSuccess?: () => void;
 }
 
+type KiroBatchImportStatus = 'pending' | 'success' | 'error';
+
+interface KiroBatchImportResult {
+  index: number;
+  status: KiroBatchImportStatus;
+  email?: string;
+  available?: number;
+  message?: string;
+}
+
 export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDrawerProps) {
   const toasterRef = useRef<ToasterRef>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const kiroBatchCancelRef = useRef(false);
   const [step, setStep] = useState<
     'platform' | 'kiro_provider' | 'method' | 'authorize'
   >('platform');
@@ -64,6 +76,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [callbackUrl, setCallbackUrl] = useState('');
   const [countdown, setCountdown] = useState(600); // Kiro授权倒计时（600秒）
   const [isWaitingAuth, setIsWaitingAuth] = useState(false); // Kiro是否等待授权中
+
+  const [kiroBatchJson, setKiroBatchJson] = useState('');
+  const [kiroBatchResults, setKiroBatchResults] = useState<KiroBatchImportResult[]>([]);
+  const [isKiroBatchImporting, setIsKiroBatchImporting] = useState(false);
 
   const [kiroAwsIdcStatus, setKiroAwsIdcStatus] = useState<
     'idle' | 'pending' | 'completed' | 'error' | 'expired'
@@ -544,6 +560,167 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
   };
 
+  const handleBatchImportKiroAccounts = async () => {
+    const raw = kiroBatchJson.replace(/^\uFEFF/, '').trim();
+    if (!raw) {
+      toasterRef.current?.show({
+        title: '输入错误',
+        message: '请粘贴批量 JSON 内容',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    if (isKiroBatchImporting) return;
+
+    kiroBatchCancelRef.current = false;
+
+    let parsed: unknown;
+    const normalized = raw.replace(/，/g, ',');
+    try {
+      parsed = JSON.parse(normalized);
+    } catch {
+      try {
+        parsed = JSON.parse(`[${normalized}]`);
+      } catch {
+        toasterRef.current?.show({
+          title: 'JSON 格式错误',
+          message: '请输入有效 JSON（支持 JSON 数组，或多个 JSON 对象用逗号分隔）',
+          variant: 'warning',
+          position: 'top-right',
+        });
+        return;
+      }
+    }
+
+    const items: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+    if (items.length === 0) {
+      toasterRef.current?.show({
+        title: '没有可导入项',
+        message: 'JSON 为空，请检查输入内容',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    const extracted: Array<{ token: string; error?: string }> = items.map((item) => {
+      if (typeof item === 'string' && item.trim()) return { token: item.trim() };
+
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return { token: '', error: '只支持对象或字符串' };
+      }
+
+      const obj = item as Record<string, unknown>;
+      const direct =
+        (obj.RT ?? obj.rt ?? obj.refresh_token ?? obj.refreshToken ?? obj.RefreshToken) as unknown;
+
+      const tokenCandidate = (() => {
+        if (typeof direct === 'string' && direct.trim()) return direct.trim();
+
+        const values = Object.values(obj);
+        let longest = '';
+        for (const v of values) {
+          if (typeof v !== 'string') continue;
+          const trimmed = v.trim();
+          if (!trimmed) continue;
+          if (trimmed.length > longest.length) longest = trimmed;
+        }
+        return longest;
+      })();
+
+      if (typeof tokenCandidate !== 'string' || !tokenCandidate.trim()) {
+        return { token: '', error: '找不到 RefreshToken（对象里必须至少有一个字符串值）' };
+      }
+
+      return { token: tokenCandidate.trim() };
+    });
+
+    setKiroBatchResults(
+      extracted.map((entry, idx) => ({
+        index: idx + 1,
+        status: entry.token ? 'pending' : 'error',
+        message: entry.token ? '等待导入' : entry.error || '解析失败',
+      }))
+    );
+
+    setIsKiroBatchImporting(true);
+
+    let successCount = 0;
+    let failedCount = 0;
+
+    const updateResult = (index: number, patch: Partial<KiroBatchImportResult>) => {
+      setKiroBatchResults((prev) =>
+        prev.map((r) => (r.index === index ? { ...r, ...patch } : r))
+      );
+    };
+
+    for (let idx = 0; idx < extracted.length; idx++) {
+      if (kiroBatchCancelRef.current) break;
+
+      const item = extracted[idx];
+      const index = idx + 1;
+
+      if (!item.token) {
+        failedCount++;
+        updateResult(index, { status: 'error' });
+        continue;
+      }
+
+      updateResult(index, { status: 'pending', message: '导入中...' });
+
+      try {
+        const account = await createKiroAccount({
+          refresh_token: item.token,
+          auth_method: 'Social',
+          is_shared: 0,
+        });
+
+        let email = account.email ?? undefined;
+        let available: number | undefined;
+
+        try {
+          const balance = await getKiroAccountBalance(account.account_id);
+          if (typeof balance.email === 'string' && balance.email.trim()) {
+            email = balance.email.trim();
+          }
+          if (typeof balance.balance?.available === 'number') {
+            available = balance.balance.available;
+          }
+        } catch {}
+
+        successCount++;
+        updateResult(index, { status: 'success', email, available, message: '成功' });
+      } catch (err) {
+        failedCount++;
+        updateResult(index, {
+          status: 'error',
+          message: err instanceof Error ? err.message : '导入失败',
+        });
+      }
+    }
+
+    setIsKiroBatchImporting(false);
+
+    if (kiroBatchCancelRef.current) return;
+
+    if (successCount > 0) {
+      window.dispatchEvent(new CustomEvent('accountAdded'));
+      onSuccess?.();
+    }
+
+    const variant =
+      successCount === 0 ? 'error' : failedCount > 0 ? 'warning' : 'success';
+
+    toasterRef.current?.show({
+      title: '批量导入完成',
+      message: `成功 ${successCount}，失败 ${failedCount}`,
+      variant,
+      position: 'top-right',
+    });
+  };
+
   const handleImportKiroAwsIdcAccount = async () => {
     const accountName = kiroImportAccountName.trim();
     const refreshToken = kiroImportRefreshToken.trim();
@@ -811,6 +988,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       pollTimerRef.current = null;
     }
 
+    kiroBatchCancelRef.current = true;
+
     setStep('platform');
     setPlatform('');
     setKiroProvider('');
@@ -822,6 +1001,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setKiroImportClientId('');
     setKiroImportClientSecret('');
     setKiroImportAccountName('');
+    setKiroBatchJson('');
+    setKiroBatchResults([]);
+    setIsKiroBatchImporting(false);
     setAntigravityImportRefreshToken('');
     setQwenCredentialJson('');
     setQwenAccountName('');
@@ -853,6 +1035,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       pollTimerRef.current = null;
     }
 
+    kiroBatchCancelRef.current = true;
+
     onOpenChange(false);
     // 延迟重置状态，等待动画完成
     setTimeout(resetState, 300);
@@ -872,6 +1056,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
             clearInterval(pollTimerRef.current);
             pollTimerRef.current = null;
           }
+          kiroBatchCancelRef.current = true;
           // 延迟重置状态
           setTimeout(resetState, 300);
         }
@@ -1298,7 +1483,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       placeholder="在此粘贴 refresh_token"
                       value={antigravityImportRefreshToken}
                       onChange={(e) => setAntigravityImportRefreshToken(e.target.value)}
-                      className="font-mono text-sm min-h-[140px]"
+                      className="font-mono text-sm [field-sizing:fixed] min-h-[96px] max-h-[180px] overflow-y-auto"
                     />
                   </div>
                 </>
@@ -1525,7 +1710,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       placeholder="在此粘贴 refresh_token"
                       value={kiroImportRefreshToken}
                       onChange={(e) => setKiroImportRefreshToken(e.target.value)}
-                      className="font-mono text-sm min-h-[110px]"
+                      className="font-mono text-sm [field-sizing:fixed] min-h-[80px] max-h-[160px] overflow-y-auto"
                     />
                   </div>
                 </>
@@ -1598,9 +1783,83 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       placeholder="在此粘贴 refresh_token"
                       value={kiroImportRefreshToken}
                       onChange={(e) => setKiroImportRefreshToken(e.target.value)}
-                      className="font-mono text-sm min-h-[110px]"
+                      className="font-mono text-sm [field-sizing:fixed] min-h-[80px] max-h-[160px] overflow-y-auto"
                     />
                   </div>
+
+                  <div className="border-t pt-6 space-y-3">
+                    <Label className="text-base font-semibold">批量导入（JSON）</Label>
+                    <p className="text-sm text-muted-foreground">
+                      支持 JSON 数组，或多个 JSON 对象用逗号分隔；每一项里随便一个字段的 value 是 RefreshToken 即可（导入顺序按 JSON 顺序）。
+                    </p>
+
+                    <Textarea
+                      id="kiro-refresh-token-batch"
+                      placeholder='示例：[{\"RT\":\"xxxx\"},{\"随便写\":\"yyyy\"}]'
+                      value={kiroBatchJson}
+                      onChange={(e) => setKiroBatchJson(e.target.value)}
+                      className="font-mono text-sm [field-sizing:fixed] min-h-[140px] max-h-[260px] overflow-y-auto"
+                    />
+
+                    <Button
+                      onClick={handleBatchImportKiroAccounts}
+                      disabled={!kiroBatchJson.trim() || isKiroBatchImporting}
+                      className="w-full cursor-pointer"
+                    >
+                      {isKiroBatchImporting ? '批量导入中...' : '批量解析并导入'}
+                    </Button>
+                  </div>
+
+                  {kiroBatchResults.length > 0 && (
+                    <div className="space-y-3">
+                      <Label className="text-base font-semibold">导入清单</Label>
+                      <div className="space-y-2">
+                        {kiroBatchResults.map((r) => (
+                          <div
+                            key={r.index}
+                            className="flex items-start justify-between gap-3 rounded-lg border p-3"
+                          >
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <p className="text-sm">
+                                <span className="font-mono text-xs text-muted-foreground mr-2">
+                                  #{r.index}
+                                </span>
+                                <span className={r.email ? '' : 'text-muted-foreground'}>
+                                  {r.email || '（未获取邮箱）'}
+                                </span>
+                              </p>
+                              {typeof r.available === 'number' && (
+                                <p className="text-xs text-muted-foreground">
+                                  余额（available）：<span className="font-mono">{r.available}</span>
+                                </p>
+                              )}
+                              {r.message && (
+                                <p className="text-xs text-muted-foreground">
+                                  {r.message}
+                                </p>
+                              )}
+                            </div>
+
+                            <Badge
+                              variant={
+                                r.status === 'success'
+                                  ? 'secondary'
+                                  : r.status === 'error'
+                                  ? 'destructive'
+                                  : 'outline'
+                              }
+                            >
+                              {r.status === 'success'
+                                ? '成功'
+                                : r.status === 'error'
+                                ? '失败'
+                                : '处理中'}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
               ) : platform === 'kiro' ? (
                 <div className="p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
