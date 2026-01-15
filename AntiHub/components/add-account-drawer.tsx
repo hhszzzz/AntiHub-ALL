@@ -171,21 +171,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
 
       if (platform === 'kiro') {
         if (kiroProvider === 'social') {
-          if (!kiroLoginMethod) {
-            toasterRef.current?.show({
-              title: '选择方式',
-              message: '请选择添加方式',
-              variant: 'warning',
-              position: 'top-right',
-            });
-            return;
-          }
-
-          if (kiroLoginMethod === 'oauth') {
-            setStep('provider');
-            return;
-          }
-
+          // Kiro OAuth 直接使用 Refresh Token 导入，移除一键登录
+          setKiroLoginMethod('refresh_token');
           setOauthUrl('');
           setOauthState('');
           setCountdown(600);
@@ -195,16 +182,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         }
 
         if (kiroProvider === 'aws_idc') {
-          if (!kiroAwsIdcMethod) {
-            toasterRef.current?.show({
-              title: '选择方式',
-              message: '请选择添加方式',
-              variant: 'warning',
-              position: 'top-right',
-            });
-            return;
-          }
-
+          // 自动设置为 manual_import 并直接跳转到 authorize 步骤
+          setKiroAwsIdcMethod('manual_import');
           setKiroAwsIdcStatus('idle');
           setKiroAwsIdcMessage('');
           setKiroAwsIdcResult(null);
@@ -305,11 +284,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       } else if (platform === 'antigravity') {
         setStep('method');
       } else {
-        if (kiroProvider === 'social' && kiroLoginMethod === 'oauth') {
-          setStep('provider');
-        } else {
-          setStep('method');
-        }
+        // Kiro OAuth 不再支持 oauth 模式，直接返回 method 步骤
+        setStep('method');
       }
       setOauthUrl('');
       setOauthState('');
@@ -1110,7 +1086,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       <Badge variant="secondary">可用</Badge>
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
-                      Google/Github OAuth 或 AWS-IMA（Builder ID）
+                      Refresh Token 导入或 AWS-IMA（Builder ID）
                     </p>
                   </div>
                 </label>
@@ -1176,9 +1152,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     className="w-4 h-4 mt-1"
                   />
                   <div className="flex-1">
-                    <h3 className="font-semibold">Kiro OAuth（Google / Github）</h3>
+                    <h3 className="font-semibold">Kiro OAuth（Refresh Token 导入）</h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      适合你使用 Google / Github 登录 Kiro
+                      通过 Refresh Token 导入 Social 登录方式获取的账号
                     </p>
                   </div>
                 </label>
@@ -1200,14 +1176,14 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       setKiroProvider('aws_idc');
                       setProvider('');
                       setKiroLoginMethod('');
-                      setKiroAwsIdcMethod('');
+                      setKiroAwsIdcMethod('manual_import');
                     }}
                     className="w-4 h-4 mt-1"
                   />
                   <div className="flex-1">
                     <h3 className="font-semibold">AWS-IMA（Builder ID / AWS IdC）</h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      设备码一键登录或手动导入（refresh_token + client）
+                      手动导入（refresh_token + client）
                     </p>
                   </div>
                 </label>
@@ -1397,30 +1373,6 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                 </div>
               ) : kiroProvider === 'aws_idc' ? (
                 <div className="space-y-3">
-                  <label
-                    className={cn(
-                      "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
-                      kiroAwsIdcMethod === 'device_code'
-                        ? "border-primary bg-primary/5"
-                        : "border-border hover:border-primary/50"
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name="kiroAwsIdcMethod"
-                      value="device_code"
-                      checked={kiroAwsIdcMethod === 'device_code'}
-                      onChange={() => setKiroAwsIdcMethod('device_code')}
-                      className="w-4 h-4 mt-1"
-                    />
-                    <div className="flex-1">
-                      <h3 className="font-semibold">一键登录（设备码，推荐）</h3>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        生成 user_code 后在页面完成授权，系统自动轮询落库
-                      </p>
-                    </div>
-                  </label>
-
                   <label
                     className={cn(
                       "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
