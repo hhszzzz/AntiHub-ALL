@@ -52,24 +52,28 @@ jobs:
           TAG_NAME="${GITHUB_REF#refs/tags/}"
           LOWER_TAG=$(echo "$TAG_NAME" | tr '[:upper:]' '[:lower:]')
           echo "tag_name=$LOWER_TAG" >> $GITHUB_OUTPUT
-          echo "Original tag: $TAG_NAME"
-          echo "Normalized tag: $LOWER_TAG"
 
-  # 构建 Web 镜像
+  # ============ Web ============
   build-web:
     needs: changes
     if: needs.changes.outputs.web == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -81,44 +85,73 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker meta (web)
-        id: meta_web
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-web
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ needs.changes.outputs.tag_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=sha
-
-      - name: Build & push (web)
+      - name: Build & push (web-${{ matrix.suffix }})
         uses: docker/build-push-action@v6
         with:
           context: ./AntiHub
           file: ./AntiHub/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta_web.outputs.tags }}
-          labels: ${{ steps.meta_web.outputs.labels }}
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-web:build-${{ github.run_id }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=web-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=web-${{ matrix.suffix }}
 
-  # 构建 Backend 镜像
-  build-backend:
-    needs: changes
-    if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
+  merge-web:
+    needs: [changes, build-web]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Create and push multi-arch manifest (web)
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-web"
+          BUILD_TAG="build-${{ github.run_id }}"
+          
+          # 创建 manifest
+          docker buildx imagetools create -t ${IMAGE}:latest \
+            ${IMAGE}:${BUILD_TAG}-amd64 \
+            ${IMAGE}:${BUILD_TAG}-arm64
+          
+          docker buildx imagetools create -t ${IMAGE}:sha-${GITHUB_SHA::7} \
+            ${IMAGE}:${BUILD_TAG}-amd64 \
+            ${IMAGE}:${BUILD_TAG}-arm64
+          
+          # 如果是 tag 推送，额外打版本号
+          if [[ "${{ needs.changes.outputs.tag_name }}" != "" ]]; then
+            docker buildx imagetools create -t ${IMAGE}:${{ needs.changes.outputs.tag_name }} \
+              ${IMAGE}:${BUILD_TAG}-amd64 \
+              ${IMAGE}:${BUILD_TAG}-arm64
+          fi
+
+  # ============ Backend ============
+  build-backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -130,44 +163,71 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker meta (backend)
-        id: meta_backend
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-backend
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ needs.changes.outputs.tag_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=sha
-
-      - name: Build & push (backend)
+      - name: Build & push (backend-${{ matrix.suffix }})
         uses: docker/build-push-action@v6
         with:
           context: ./AntiHub-Backend
           file: ./AntiHub-Backend/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta_backend.outputs.tags }}
-          labels: ${{ steps.meta_backend.outputs.labels }}
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-backend:build-${{ github.run_id }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=backend-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=backend-${{ matrix.suffix }}
 
-  # 构建 Plugin 镜像
-  build-plugin:
-    needs: changes
-    if: needs.changes.outputs.plugin == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
+  merge-backend:
+    needs: [changes, build-backend]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Create and push multi-arch manifest (backend)
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-backend"
+          BUILD_TAG="build-${{ github.run_id }}"
+          
+          docker buildx imagetools create -t ${IMAGE}:latest \
+            ${IMAGE}:${BUILD_TAG}-amd64 \
+            ${IMAGE}:${BUILD_TAG}-arm64
+          
+          docker buildx imagetools create -t ${IMAGE}:sha-${GITHUB_SHA::7} \
+            ${IMAGE}:${BUILD_TAG}-amd64 \
+            ${IMAGE}:${BUILD_TAG}-arm64
+          
+          if [[ "${{ needs.changes.outputs.tag_name }}" != "" ]]; then
+            docker buildx imagetools create -t ${IMAGE}:${{ needs.changes.outputs.tag_name }} \
+              ${IMAGE}:${BUILD_TAG}-amd64 \
+              ${IMAGE}:${BUILD_TAG}-arm64
+          fi
+
+  # ============ Plugin ============
+  build-plugin:
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -179,25 +239,46 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker meta (plugin)
-        id: meta_plugin
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-plugin
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ needs.changes.outputs.tag_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=sha
-
-      - name: Build & push (plugin)
+      - name: Build & push (plugin-${{ matrix.suffix }})
         uses: docker/build-push-action@v6
         with:
           context: ./AntiHub-plugin
           file: ./AntiHub-plugin/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta_plugin.outputs.tags }}
-          labels: ${{ steps.meta_plugin.outputs.labels }}
-          cache-from: type=gha,scope=plugin
-          cache-to: type=gha,mode=max,scope=plugin
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-plugin:build-${{ github.run_id }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=plugin-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=plugin-${{ matrix.suffix }}
+
+  merge-plugin:
+    needs: [changes, build-plugin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest (plugin)
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-plugin"
+          BUILD_TAG="build-${{ github.run_id }}"
+          
+          docker buildx imagetools create -t ${IMAGE}:latest \
+            ${IMAGE}:${BUILD_TAG}-amd64 \
+            ${IMAGE}:${BUILD_TAG}-arm64
+          
+          docker buildx imagetools create -t ${IMAGE}:sha-${GITHUB_SHA::7} \
+            ${IMAGE}:${BUILD_TAG}-amd64 \
+            ${IMAGE}:${BUILD_TAG}-arm64
+          
+          if [[ "${{ needs.changes.outputs.tag_name }}" != "" ]]; then
+            docker buildx imagetools create -t ${IMAGE}:${{ needs.changes.outputs.tag_name }} \
+              ${IMAGE}:${BUILD_TAG}-amd64 \
+              ${IMAGE}:${BUILD_TAG}-arm64
+          fi
