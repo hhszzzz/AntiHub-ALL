@@ -1401,13 +1401,13 @@ export default function AccountsPage() {
       </Dialog>
 
       {/* Antigravity 账号详情 - 响应式弹窗 */}
-      <ResponsiveDialog open={isAntigravityDetailDialogOpen} onOpenChange={setIsAntigravityDetailDialogOpen}>
-        <ResponsiveDialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
-          <ResponsiveDialogHeader>
+      <ResponsiveDialog open={isAntigravityDetailDialogOpen} onOpenChange={setIsAntigravityDetailDialogOpen} dismissible={false}>
+        <ResponsiveDialogContent className="sm:max-w-[600px] max-h-[90vh] flex flex-col p-0" showHandle={false}>
+          <ResponsiveDialogHeader className="shrink-0 px-4 pt-4 pb-2 border-b">
             <ResponsiveDialogTitle>账号详细信息</ResponsiveDialogTitle>
           </ResponsiveDialogHeader>
 
-          <div className="py-4">
+          <div className="flex-1 overflow-y-auto px-4 py-4">
             {isLoadingAntigravityDetail ? (
               <div className="flex items-center justify-center py-12">
                 <MorphingSquare message="加载账号信息..." />
@@ -1459,7 +1459,7 @@ export default function AccountsPage() {
             )}
           </div>
 
-          <ResponsiveDialogFooter>
+          <ResponsiveDialogFooter className="shrink-0 px-4 pb-4 pt-2 border-t">
             <Button variant="outline" onClick={() => setIsAntigravityDetailDialogOpen(false)}>
               关闭
             </Button>
@@ -1468,13 +1468,13 @@ export default function AccountsPage() {
       </ResponsiveDialog>
 
       {/* Kiro 账号详情 - 响应式弹窗 */}
-      <ResponsiveDialog open={isKiroDetailDialogOpen} onOpenChange={setIsKiroDetailDialogOpen}>
-        <ResponsiveDialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
-          <ResponsiveDialogHeader>
+      <ResponsiveDialog open={isKiroDetailDialogOpen} onOpenChange={setIsKiroDetailDialogOpen} dismissible={false}>
+        <ResponsiveDialogContent className="sm:max-w-[600px] max-h-[90vh] flex flex-col p-0" showHandle={false}>
+          <ResponsiveDialogHeader className="shrink-0 px-4 pt-4 pb-2 border-b">
             <ResponsiveDialogTitle>账号详细信息</ResponsiveDialogTitle>
           </ResponsiveDialogHeader>
 
-          <div className="py-4">
+          <div className="flex-1 overflow-y-auto px-4 py-4">
             {isLoadingDetail ? (
               <div className="flex items-center justify-center py-12">
                 <MorphingSquare message="加载余额信息..." />
@@ -1594,7 +1594,7 @@ export default function AccountsPage() {
             )}
           </div>
 
-          <ResponsiveDialogFooter>
+          <ResponsiveDialogFooter className="shrink-0 px-4 pb-4 pt-2 border-t">
             <Button
               variant="outline"
               onClick={() => setIsKiroDetailDialogOpen(false)}

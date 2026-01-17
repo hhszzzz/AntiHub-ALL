@@ -24,11 +24,13 @@ interface ResponsiveDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
+  dismissible?: boolean;
 }
 
 interface ResponsiveDialogContentProps {
   className?: string;
   children: React.ReactNode;
+  showHandle?: boolean;
 }
 
 interface ResponsiveDialogHeaderProps {
@@ -51,7 +53,7 @@ interface ResponsiveDialogFooterProps {
   children: React.ReactNode;
 }
 
-const ResponsiveDialog = ({ open, onOpenChange, children }: ResponsiveDialogProps) => {
+const ResponsiveDialog = ({ open, onOpenChange, children, dismissible = true }: ResponsiveDialogProps) => {
   const isDesktop = useMediaQuery('(min-width: 768px)');
 
   if (isDesktop) {
@@ -59,20 +61,20 @@ const ResponsiveDialog = ({ open, onOpenChange, children }: ResponsiveDialogProp
   }
 
   return (
-    <Drawer open={open} onOpenChange={onOpenChange}>
+    <Drawer open={open} onOpenChange={onOpenChange} dismissible={dismissible}>
       {children}
     </Drawer>
   );
 };
 
-const ResponsiveDialogContent = ({ className, children }: ResponsiveDialogContentProps) => {
+const ResponsiveDialogContent = ({ className, children, showHandle }: ResponsiveDialogContentProps) => {
   const isDesktop = useMediaQuery('(min-width: 768px)');
 
   if (isDesktop) {
     return <DialogContent className={className}>{children}</DialogContent>;
   }
 
-  return <DrawerContent className={className}>{children}</DrawerContent>;
+  return <DrawerContent className={className} showHandle={showHandle}>{children}</DrawerContent>;
 };
 
 const ResponsiveDialogHeader = ({ className, children }: ResponsiveDialogHeaderProps) => {
