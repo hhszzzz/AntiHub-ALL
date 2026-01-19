@@ -2,30 +2,97 @@ import logger from '../utils/logger.js';
 import accountService from './account.service.js';
 import config from '../config/config.js';
 
-class ProjectService {
-  async listGcpProjects(accessToken) {
-    const url = 'https://cloudresourcemanager.googleapis.com/v1/projects';
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-    });
+// Keep project discovery behavior consistent with CLIProxyAPI (CPA).
+// These headers affect how Cloud Code returns cloudaicompanionProject for Antigravity.
+const CODE_ASSIST_USER_AGENT = 'google-api-nodejs-client/9.15.1';
+const CODE_ASSIST_X_GOOG_API_CLIENT = 'google-cloud-sdk vscode_cloudshelleditor/0.1';
+const CODE_ASSIST_CLIENT_METADATA = '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}';
 
-    if (!response.ok) {
-      const responseText = await response.text();
-      throw new Error(`listGcpProjects API request failed (${response.status}): ${responseText}`);
+class ProjectService {
+  normalizeGcpProjectId(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  normalizeGcpProjectName(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  normalizeGcpLifecycleState(value) {
+    return typeof value === 'string' ? value.trim().toUpperCase() : '';
+  }
+
+  async listGcpProjects(accessToken) {
+    const requestHeaders = {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    };
+
+    const v1Url = 'https://cloudresourcemanager.googleapis.com/v1/projects';
+    try {
+      const response = await fetch(v1Url, { method: 'GET', headers: requestHeaders });
+      if (!response.ok) {
+        const responseText = await response.text();
+        throw new Error(`listGcpProjects(v1) failed (${response.status}): ${responseText}`);
+      }
+
+      const data = await response.json();
+      return Array.isArray(data?.projects) ? data.projects : [];
+    } catch (error) {
+      logger.warn(`listGcpProjects(v1) failed, fallback to v3 search: ${error?.message || error}`);
     }
 
-    const data = await response.json();
-    return Array.isArray(data?.projects) ? data.projects : [];
+    // Fallback: Cloud Resource Manager v3 projects:search (more tolerant in some org/IAM setups).
+    const v3Url = 'https://cloudresourcemanager.googleapis.com/v3/projects:search';
+    const projects = [];
+    let pageToken = '';
+    const maxPages = 5;
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const body = { pageSize: 200 };
+      if (pageToken) body.pageToken = pageToken;
+
+      const response = await fetch(v3Url, {
+        method: 'POST',
+        headers: requestHeaders,
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const responseText = await response.text();
+        throw new Error(`listGcpProjects(v3) failed (${response.status}): ${responseText}`);
+      }
+
+      const data = await response.json();
+      const items = Array.isArray(data?.projects) ? data.projects : [];
+
+      for (const rawProject of items) {
+        if (!rawProject || typeof rawProject !== 'object') continue;
+
+        const projectId = this.normalizeGcpProjectId(rawProject.projectId);
+        if (!projectId) continue;
+
+        const displayName = this.normalizeGcpProjectName(rawProject.displayName);
+        const name = this.normalizeGcpProjectName(rawProject.name);
+        const lifecycleState = this.normalizeGcpLifecycleState(rawProject.state || rawProject.lifecycleState);
+
+        projects.push({
+          projectId,
+          name: displayName || name,
+          lifecycleState: lifecycleState || 'ACTIVE',
+        });
+      }
+
+      pageToken = this.normalizeGcpProjectId(data?.nextPageToken);
+      if (!pageToken) break;
+    }
+
+    return projects;
   }
 
   selectDefaultGcpProjectId(projects) {
     if (!Array.isArray(projects) || projects.length === 0) return '';
 
-    const active = projects.find((p) => p && typeof p === 'object' && p.lifecycleState === 'ACTIVE');
+    const active = projects.find((p) => p && typeof p === 'object' && (p.lifecycleState === 'ACTIVE' || p.state === 'ACTIVE'));
     const candidate = active || projects[0];
     const projectId = candidate?.projectId;
     return typeof projectId === 'string' ? projectId.trim() : '';
@@ -43,10 +110,12 @@ class ProjectService {
   buildRequestHeaders({ accessToken, host }) {
     return {
       Host: host,
-      'User-Agent': config.api.userAgent,
+      'User-Agent': CODE_ASSIST_USER_AGENT,
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
       'Accept-Encoding': 'gzip',
+      'X-Goog-Api-Client': CODE_ASSIST_X_GOOG_API_CLIENT,
+      'Client-Metadata': CODE_ASSIST_CLIENT_METADATA,
     };
   }
 
