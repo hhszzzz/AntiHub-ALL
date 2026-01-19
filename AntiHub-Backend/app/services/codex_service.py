@@ -288,6 +288,27 @@ def _safe_str(value: Any) -> str:
     return str(value).strip()
 
 
+def _default_codex_account_name(email: Optional[str], openai_account_id: Optional[str]) -> str:
+    """
+    Default account display name:
+    - first 3 chars of email local-part + first segment of account_id (before '-')
+    """
+    email_str = _safe_str(email)
+    local = email_str.split("@", 1)[0] if email_str else ""
+    email_prefix = local[:3] if local else ""
+
+    account_id_str = _safe_str(openai_account_id)
+    account_prefix = account_id_str.split("-", 1)[0] if account_id_str else ""
+
+    if email_prefix and account_prefix:
+        return f"{email_prefix}-{account_prefix}"
+    if email_prefix:
+        return email_prefix
+    if account_prefix:
+        return account_prefix
+    return email_str or "Codex Account"
+
+
 def _parse_codemodels_env(raw: str) -> list[str]:
     value = (raw or "").strip()
     if not value:
@@ -824,10 +845,14 @@ class CodexService:
 
         account_name = (session.get("account_name") or "").strip()
         if not account_name:
-            account_name = profile.get("openai_account_id") or profile.get("email") or "Codex Account"
+            account_name = _default_codex_account_name(profile.get("email"), profile.get("openai_account_id"))
 
         existing = None
-        if profile.get("openai_account_id"):
+        if profile.get("openai_account_id") and profile.get("email"):
+            existing = await self.repo.get_by_user_id_and_openai_account_id_and_email(
+                user_id, profile["openai_account_id"], profile["email"]
+            )
+        elif profile.get("openai_account_id"):
             existing = await self.repo.get_by_user_id_and_openai_account_id(user_id, profile["openai_account_id"])
         elif profile.get("email"):
             existing = await self.repo.get_by_user_id_and_email(user_id, profile["email"])
@@ -921,10 +946,12 @@ class CodexService:
 
         final_name = (account_name or "").strip()
         if not final_name:
-            final_name = openai_account_id or email or "Codex Account"
+            final_name = _default_codex_account_name(email, openai_account_id)
 
         existing = None
-        if openai_account_id:
+        if openai_account_id and email:
+            existing = await self.repo.get_by_user_id_and_openai_account_id_and_email(user_id, openai_account_id, email)
+        elif openai_account_id:
             existing = await self.repo.get_by_user_id_and_openai_account_id(user_id, openai_account_id)
         elif email:
             existing = await self.repo.get_by_user_id_and_email(user_id, email)

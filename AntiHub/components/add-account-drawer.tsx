@@ -1145,17 +1145,92 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       return;
     }
 
+    let parsed: any;
     try {
-      await importCodexAccount({
-        credential_json: credentialJson,
-        account_name: codexAccountName.trim() || undefined,
-        is_shared: 0,
+      parsed = JSON.parse(credentialJson);
+    } catch {
+      toasterRef.current?.show({
+        title: '凭证格式错误',
+        message: '请输入有效的 JSON（支持单个对象或数组）',
+        variant: 'warning',
+        position: 'top-right',
       });
+      return;
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      toasterRef.current?.show({
+        title: '凭证格式错误',
+        message: '请输入有效的 JSON（支持单个对象或数组）',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    const isBatch = Array.isArray(parsed);
+    const items: any[] = isBatch ? parsed : [parsed];
+    if (isBatch && items.length === 0) {
+      toasterRef.current?.show({
+        title: '凭证格式错误',
+        message: 'JSON 数组不能为空',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    const providedName = codexAccountName.trim();
+    if (isBatch && providedName) {
+      toasterRef.current?.show({
+        title: '提示',
+        message: '批量导入会自动命名，已忽略“账号名称”',
+        variant: 'warning',
+        position: 'top-right',
+      });
+    }
+
+    try {
+      let successCount = 0;
+      let failedCount = 0;
+      const errors: string[] = [];
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          failedCount++;
+          errors.push(`第 ${i + 1} 个条目不是 JSON 对象`);
+          continue;
+        }
+        try {
+          await importCodexAccount({
+            credential_json: JSON.stringify(item),
+            account_name: isBatch ? undefined : (providedName || undefined),
+            is_shared: 0,
+          });
+          successCount++;
+        } catch (err) {
+          failedCount++;
+          errors.push(`第 ${i + 1} 个导入失败：${err instanceof Error ? err.message : '未知错误'}`);
+        }
+      }
+
+      if (successCount === 0) {
+        toasterRef.current?.show({
+          title: '导入失败',
+          message: errors[0] || '导入 Codex 账号失败',
+          variant: 'error',
+          position: 'top-right',
+        });
+        return;
+      }
 
       toasterRef.current?.show({
-        title: '导入成功',
-        message: 'Codex 账号已添加',
-        variant: 'success',
+        title: isBatch ? '批量导入完成' : '导入成功',
+        message: isBatch
+          ? `成功 ${successCount} 个${failedCount ? `，失败 ${failedCount} 个` : ''}`
+          : 'Codex 账号已添加',
+        variant: failedCount ? 'warning' : 'success',
         position: 'top-right',
       });
 
@@ -1846,7 +1921,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       className="h-12"
                     />
                     <p className="text-sm text-muted-foreground">
-                      留空会自动使用 account_id 作为名称（同一邮箱不同团队会分别保存）
+                      留空会自动命名：邮箱前三位 + account_id 首段（按 account_id + 邮箱 区分，避免覆盖）
                     </p>
                   </div>
 
@@ -1863,9 +1938,12 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                         <Label htmlFor="codex-credential-json" className="text-base font-semibold">
                           credential_json
                         </Label>
+                        <p className="text-sm text-muted-foreground">
+                          支持批量：粘贴 JSON 数组（例如 <span className="font-mono">{'[{...},{...}]'}</span>）
+                        </p>
                         <Textarea
                           id="codex-credential-json"
-                          placeholder="在此粘贴 CLIProxyAPI / Codex CLI 导出的 codex-*.json 内容"
+                          placeholder="在此粘贴 CLIProxyAPI / Codex CLI 导出的 codex-*.json 内容（支持对象/数组）"
                           value={codexCredentialJson}
                           onChange={(e) => setCodexCredentialJson(e.target.value)}
                           className="font-mono text-sm min-h-[220px]"

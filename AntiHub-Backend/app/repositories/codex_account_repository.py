@@ -68,6 +68,24 @@ class CodexAccountRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_user_id_and_openai_account_id_and_email(
+        self,
+        user_id: int,
+        openai_account_id: str,
+        email: str,
+    ) -> Optional[CodexAccount]:
+        result = await self.db.execute(
+            select(CodexAccount)
+            .where(
+                CodexAccount.user_id == user_id,
+                CodexAccount.openai_account_id == openai_account_id,
+                CodexAccount.email == email,
+            )
+            .order_by(CodexAccount.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         user_id: int,
