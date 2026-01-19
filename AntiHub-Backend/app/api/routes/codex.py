@@ -313,6 +313,30 @@ async def refresh_codex_account(
         )
 
 
+@router.get("/accounts/{account_id}/wham-usage", summary="查询 Codex 限额窗口（wham/usage）")
+async def get_codex_wham_usage(
+    account_id: int,
+    current_user: User = Depends(get_current_user),
+    service: CodexService = Depends(get_codex_service),
+):
+    try:
+        return await service.get_account_wham_usage(current_user.id, account_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(
+            "get codex wham/usage failed: user_id=%s account_id=%s error=%s",
+            current_user.id,
+            account_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="查询限额窗口失败",
+        )
+
+
 @router.delete("/accounts/{account_id}", summary="删除 Codex 账号")
 async def delete_codex_account(
     account_id: int,

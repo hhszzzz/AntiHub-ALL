@@ -2102,6 +2102,40 @@ export async function refreshCodexAccount(accountId: number): Promise<CodexAccou
   return result.data;
 }
 
+export interface CodexWhamUsageWindow {
+  used_percent: number | null;
+  limit_window_seconds: number | null;
+  reset_after_seconds: number | null;
+  reset_at: string | null;
+}
+
+export interface CodexWhamUsageRateLimit {
+  allowed: boolean | null;
+  limit_reached: boolean | null;
+  primary_window: CodexWhamUsageWindow;
+  secondary_window?: CodexWhamUsageWindow;
+}
+
+export interface CodexWhamUsageParsed {
+  plan_type: string | null;
+  rate_limit: CodexWhamUsageRateLimit;
+  code_review_rate_limit: CodexWhamUsageRateLimit;
+}
+
+export interface CodexWhamUsageData {
+  fetched_at: string;
+  raw: Record<string, any>;
+  parsed: CodexWhamUsageParsed;
+}
+
+export async function getCodexWhamUsage(accountId: number): Promise<CodexWhamUsageData> {
+  const result = await fetchWithAuth<{ success: boolean; data: CodexWhamUsageData }>(
+    `${API_BASE_URL}/api/codex/accounts/${accountId}/wham-usage`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
 export async function updateCodexAccountStatus(accountId: number, status: number): Promise<CodexAccount> {
   const result = await fetchWithAuth<{ success: boolean; data: CodexAccount }>(
     `${API_BASE_URL}/api/codex/accounts/${accountId}/status`,

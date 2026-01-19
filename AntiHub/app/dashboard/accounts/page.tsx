@@ -30,6 +30,8 @@ import {
   updateCodexAccountStatus,
   updateCodexAccountName,
   refreshCodexAccount,
+  getCodexWhamUsage,
+  type CodexWhamUsageData,
   type Account,
   type AccountProjects,
   type AntigravityAccountDetail,
@@ -156,6 +158,12 @@ export default function AccountsPage() {
   // Codex 账号详情 Dialog 状态
   const [isCodexDetailDialogOpen, setIsCodexDetailDialogOpen] = useState(false);
   const [detailCodexAccount, setDetailCodexAccount] = useState<CodexAccount | null>(null);
+
+  // Codex 限额窗口（wham/usage）Dialog 状态
+  const [isCodexWhamDialogOpen, setIsCodexWhamDialogOpen] = useState(false);
+  const [codexWhamAccount, setCodexWhamAccount] = useState<CodexAccount | null>(null);
+  const [codexWhamData, setCodexWhamData] = useState<CodexWhamUsageData | null>(null);
+  const [isLoadingCodexWham, setIsLoadingCodexWham] = useState(false);
 
   // 确认对话框状态
   const [isConfirmDialogOpen, setIsConfirmDialogOpen] = useState(false);
@@ -908,6 +916,27 @@ export default function AccountsPage() {
     }
   };
 
+  const handleViewCodexWhamUsage = async (account: CodexAccount) => {
+    setCodexWhamAccount(account);
+    setIsCodexWhamDialogOpen(true);
+    setIsLoadingCodexWham(true);
+    setCodexWhamData(null);
+
+    try {
+      const data = await getCodexWhamUsage(account.account_id);
+      setCodexWhamData(data);
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '加载失败',
+        message: err instanceof Error ? err.message : '加载限额窗口失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+    } finally {
+      setIsLoadingCodexWham(false);
+    }
+  };
+
   const handleViewCodexDetail = (account: CodexAccount) => {
     setDetailCodexAccount(account);
     setIsCodexDetailDialogOpen(true);
@@ -1622,6 +1651,10 @@ export default function AccountsPage() {
                                   <IconRefresh className="size-4 mr-2" />
                                   {refreshingCodexAccountId === account.account_id ? '刷新中...' : '刷新官方额度/限额'}
                                 </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleViewCodexWhamUsage(account)}>
+                                  <IconChartBar className="size-4 mr-2" />
+                                  查看限额窗口
+                                </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleCopyCodexCredentials(account)}>
                                   <IconCopy className="size-4 mr-2" />
                                   复制凭证为JSON
@@ -2127,6 +2160,114 @@ export default function AccountsPage() {
           </ResponsiveDialogFooter>
       </ResponsiveDialogContent>
       </ResponsiveDialog>
+
+      {/* Codex 限额窗口（wham/usage） */}
+      <Dialog
+        open={isCodexWhamDialogOpen}
+        onOpenChange={(open) => {
+          setIsCodexWhamDialogOpen(open);
+          if (!open) {
+            setCodexWhamAccount(null);
+            setCodexWhamData(null);
+            setIsLoadingCodexWham(false);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[95vw] sm:max-w-[720px] max-h-[90vh] p-0">
+          <DialogHeader className="px-4 pt-6 pb-2 md:px-6 text-left">
+            <DialogTitle className="text-left">Codex 限额窗口</DialogTitle>
+            <DialogDescription className="break-all text-left">
+              账号 ID: {codexWhamAccount?.account_id}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="px-4 pb-6 md:px-6 overflow-y-auto max-h-[calc(90vh-150px)]">
+            {isLoadingCodexWham ? (
+              <div className="flex items-center justify-center py-12">
+                <MorphingSquare message="加载限额窗口..." />
+              </div>
+            ) : codexWhamData?.parsed ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-sm">
+                  <Badge variant="secondary">
+                    {codexWhamData.parsed.plan_type || codexWhamAccount?.chatgpt_plan_type || '-'}
+                  </Badge>
+                  <span className="text-muted-foreground">
+                    拉取时间：{new Date(codexWhamData.fetched_at).toLocaleString('zh-CN')}
+                  </span>
+                </div>
+
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="min-w-[140px]">窗口</TableHead>
+                      <TableHead className="min-w-[90px]">已用(%)</TableHead>
+                      <TableHead className="min-w-[90px]">剩余(%)</TableHead>
+                      <TableHead className="min-w-[180px]">重置时间</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(() => {
+                      const w5 = codexWhamData.parsed.rate_limit?.primary_window;
+                      const ww = codexWhamData.parsed.rate_limit?.secondary_window;
+                      const wc = codexWhamData.parsed.code_review_rate_limit?.primary_window;
+                      const rows = [
+                        { name: '5 小时限额', w: w5 },
+                        { name: '周限额', w: ww },
+                        { name: '代码审查限额', w: wc },
+                      ];
+
+                      return rows.map((row) => {
+                        const used = row.w?.used_percent ?? null;
+                        const remaining = typeof used === 'number' ? Math.max(0, 100 - used) : null;
+                        const resetAt = row.w?.reset_at ? new Date(row.w.reset_at).toLocaleString('zh-CN') : '-';
+
+                        return (
+                          <TableRow key={row.name}>
+                            <TableCell className="font-medium">{row.name}</TableCell>
+                            <TableCell className="font-mono text-sm whitespace-nowrap">
+                              {typeof used === 'number' ? used : '--'}
+                            </TableCell>
+                            <TableCell className="font-mono text-sm whitespace-nowrap">
+                              {typeof remaining === 'number' ? remaining : '--'}
+                            </TableCell>
+                            <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+                              {resetAt}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      });
+                    })()}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-muted-foreground">
+                <p className="text-sm">暂无限额信息</p>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="px-4 pb-4 md:px-6">
+            <Button variant="outline" onClick={() => setIsCodexWhamDialogOpen(false)}>
+              关闭
+            </Button>
+            <Button
+              onClick={() => codexWhamAccount && handleViewCodexWhamUsage(codexWhamAccount)}
+              disabled={isLoadingCodexWham || !codexWhamAccount}
+            >
+              {isLoadingCodexWham ? (
+                <>
+                  <MorphingSquare className="size-4 mr-2" />
+                  刷新中...
+                </>
+              ) : (
+                '重新加载'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Codex 账号详情 - 响应式弹窗 */}
       <ResponsiveDialog

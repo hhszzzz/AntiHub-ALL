@@ -69,6 +69,10 @@ CODEX_MODEL_ALIASES = {
 
 CODEX_API_BASE_URL = (os.getenv("CODEX_API_BASE_URL") or "https://chatgpt.com/backend-api/codex").rstrip("/")
 CODEX_RESPONSES_URL = f"{CODEX_API_BASE_URL}/responses"
+_CODEX_BASE_FOR_WHAM = CODEX_API_BASE_URL.rstrip("/")
+if _CODEX_BASE_FOR_WHAM.endswith("/codex"):
+    _CODEX_BASE_FOR_WHAM = _CODEX_BASE_FOR_WHAM[: -len("/codex")]
+CODEX_WHAM_USAGE_URL = f"{_CODEX_BASE_FOR_WHAM}/wham/usage"
 CODEX_DEFAULT_VERSION = "0.21.0"
 CODEX_OPENAI_BETA = "responses=experimental"
 CODEX_DEFAULT_USER_AGENT = "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
@@ -502,6 +506,141 @@ def _infer_limit_bucket(error_text: str) -> str:
     return "5h"
 
 
+def _safe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    s = _safe_str(value)
+    if not s:
+        return None
+    try:
+        return int(s)
+    except Exception:
+        try:
+            return int(float(s))
+        except Exception:
+            return None
+
+
+def _safe_percent(value: Any) -> Optional[int]:
+    i = _safe_int(value)
+    if i is None:
+        return None
+    return max(0, min(100, i))
+
+
+def _parse_wham_window(
+    window: Any,
+    *,
+    now: datetime,
+    allowed: Optional[bool],
+    limit_reached: Optional[bool],
+) -> Dict[str, Any]:
+    if not isinstance(window, dict):
+        return {"used_percent": None, "limit_window_seconds": None, "reset_after_seconds": None, "reset_at": None}
+
+    used_percent = _safe_percent(window.get("used_percent") if "used_percent" in window else window.get("usedPercent"))
+    limit_window_seconds = _safe_int(
+        window.get("limit_window_seconds") if "limit_window_seconds" in window else window.get("limitWindowSeconds")
+    )
+    reset_after_seconds = _safe_int(
+        window.get("reset_after_seconds") if "reset_after_seconds" in window else window.get("resetAfterSeconds")
+    )
+    reset_at_unix = _safe_int(window.get("reset_at") if "reset_at" in window else window.get("resetAt"))
+
+    reset_at: Optional[datetime] = None
+    if reset_at_unix is not None:
+        try:
+            reset_at = datetime.fromtimestamp(int(reset_at_unix), tz=timezone.utc)
+        except Exception:
+            reset_at = None
+    elif reset_after_seconds is not None:
+        try:
+            reset_at = now + timedelta(seconds=int(reset_after_seconds))
+        except Exception:
+            reset_at = None
+
+    # wham/usage 有时不返回 used_percent；如果已到顶且能推断 reset，则按 100% 处理，避免 UI 显示空。
+    if used_percent is None and reset_at is not None:
+        if allowed is False or limit_reached is True:
+            used_percent = 100
+
+    return {
+        "used_percent": used_percent,
+        "limit_window_seconds": limit_window_seconds,
+        "reset_after_seconds": reset_after_seconds,
+        "reset_at": reset_at,
+    }
+
+
+def _parse_wham_usage(payload: Any, *, now: datetime) -> Dict[str, Any]:
+    """
+    解析 `GET /backend-api/wham/usage` 响应，输出统一结构（兼容 snake_case + camelCase）。
+    注意：这里只做“best effort”，字段缺失时保持为 None，不抛异常。
+    """
+    if not isinstance(payload, dict):
+        return {
+            "plan_type": None,
+            "rate_limit": {},
+            "code_review_rate_limit": {},
+        }
+
+    plan_type = _safe_str(payload.get("plan_type") if "plan_type" in payload else payload.get("planType")) or None
+
+    rate_limit = payload.get("rate_limit") if "rate_limit" in payload else payload.get("rateLimit")
+    if not isinstance(rate_limit, dict):
+        rate_limit = {}
+    rl_allowed = rate_limit.get("allowed")
+    rl_limit_reached = rate_limit.get("limit_reached") if "limit_reached" in rate_limit else rate_limit.get("limitReached")
+    allowed = rl_allowed if isinstance(rl_allowed, bool) else None
+    limit_reached = rl_limit_reached if isinstance(rl_limit_reached, bool) else None
+
+    primary = rate_limit.get("primary_window") if "primary_window" in rate_limit else rate_limit.get("primaryWindow")
+    secondary = (
+        rate_limit.get("secondary_window") if "secondary_window" in rate_limit else rate_limit.get("secondaryWindow")
+    )
+
+    code_review = (
+        payload.get("code_review_rate_limit")
+        if "code_review_rate_limit" in payload
+        else payload.get("codeReviewRateLimit")
+    )
+    if not isinstance(code_review, dict):
+        code_review = {}
+    cr_allowed = code_review.get("allowed")
+    cr_limit_reached = (
+        code_review.get("limit_reached") if "limit_reached" in code_review else code_review.get("limitReached")
+    )
+    cr_allowed_bool = cr_allowed if isinstance(cr_allowed, bool) else None
+    cr_limit_reached_bool = cr_limit_reached if isinstance(cr_limit_reached, bool) else None
+    cr_primary = code_review.get("primary_window") if "primary_window" in code_review else code_review.get("primaryWindow")
+
+    return {
+        "plan_type": plan_type,
+        "rate_limit": {
+            "allowed": allowed,
+            "limit_reached": limit_reached,
+            "primary_window": _parse_wham_window(primary, now=now, allowed=allowed, limit_reached=limit_reached),
+            "secondary_window": _parse_wham_window(secondary, now=now, allowed=allowed, limit_reached=limit_reached),
+        },
+        "code_review_rate_limit": {
+            "allowed": cr_allowed_bool,
+            "limit_reached": cr_limit_reached_bool,
+            "primary_window": _parse_wham_window(
+                cr_primary,
+                now=now,
+                allowed=cr_allowed_bool,
+                limit_reached=cr_limit_reached_bool,
+            ),
+        },
+    }
+
+
 def _normalize_codex_responses_request(request_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Codex 上游是 responses SSE（CLIProxyAPI 也会强制 stream=true）。
@@ -557,6 +696,24 @@ def _build_codex_headers(
         "Conversation_id": session_id,
         "User-Agent": ua,
         "Originator": "codex_cli_rs",
+    }
+    if chatgpt_account_id:
+        headers["Chatgpt-Account-Id"] = chatgpt_account_id
+    return headers
+
+
+def _build_wham_usage_headers(
+    *,
+    access_token: str,
+    chatgpt_account_id: str,
+    user_agent: Optional[str],
+) -> Dict[str, str]:
+    ua = (user_agent or "").strip() or CODEX_DEFAULT_USER_AGENT
+    headers: Dict[str, str] = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": ua,
     }
     if chatgpt_account_id:
         headers["Chatgpt-Account-Id"] = chatgpt_account_id
@@ -1082,13 +1239,162 @@ class CodexService:
             raise ValueError("账号不存在")
         return {"success": True, "data": account}
 
+    async def get_account_wham_usage(self, user_id: int, account_id: int) -> Dict[str, Any]:
+        """
+        查询 `GET /backend-api/wham/usage`（后端代发，避免前端直连导致 IP 不一致）。
+
+        返回：
+        - raw：上游原始 JSON
+        - parsed：后端解析后的统一结构（含 5h/周限 + 代码审查窗口）
+        """
+        account = await self.repo.get_by_id_and_user_id(account_id, user_id)
+        if not account:
+            raise ValueError("账号不存在")
+
+        try:
+            creds = self._load_account_credentials(account)
+        except Exception as e:
+            logger.error(
+                "codex wham/usage: failed to load account credentials (decrypt/parse): user_id=%s account_id=%s",
+                user_id,
+                account_id,
+                exc_info=True,
+            )
+            raise ValueError("账号凭证解析失败：请检查后端加密密钥是否变更，必要时重新导入该账号") from e
+
+        creds = await self._ensure_account_tokens(account, creds)
+        access_token = _safe_str(creds.get("access_token"))
+        if not access_token:
+            raise ValueError("账号缺少 access_token")
+
+        chatgpt_account_id = self._resolve_chatgpt_account_id(account, creds)
+        if not chatgpt_account_id:
+            raise ValueError("账号缺少 ChatGPT account_id")
+
+        raw = await self._fetch_wham_usage_raw(
+            account,
+            creds,
+            access_token=access_token,
+            chatgpt_account_id=chatgpt_account_id,
+        )
+        now = _now_utc()
+        parsed = _parse_wham_usage(raw, now=now)
+        return {"success": True, "data": {"fetched_at": now, "raw": raw, "parsed": parsed}}
+
+    async def _fetch_wham_usage_raw(
+        self,
+        account: Any,
+        creds: Dict[str, Any],
+        *,
+        access_token: str,
+        chatgpt_account_id: str,
+    ) -> Dict[str, Any]:
+        """
+        调用 `wham/usage` 并返回 JSON（带一次 401 -> refresh_token 重试）。
+        注意：该方法可能会触发 token 刷新/账号冻结/禁用等落库副作用（与 refresh 行为一致）。
+        """
+        timeout = httpx.Timeout(connect=10.0, read=30.0, write=20.0, pool=10.0)
+        client = _build_httpx_async_client(timeout=timeout, follow_redirects=True)
+        resp: Optional[httpx.Response] = None
+        try:
+            for attempt in range(2):
+                if resp is not None:
+                    try:
+                        await resp.aclose()
+                    except Exception:
+                        pass
+                    resp = None
+
+                headers = _build_wham_usage_headers(
+                    access_token=access_token,
+                    chatgpt_account_id=chatgpt_account_id,
+                    user_agent=None,
+                )
+                try:
+                    resp = await client.get(CODEX_WHAM_USAGE_URL, headers=headers)
+                except httpx.HTTPError as e:
+                    proxy_hint = _redact_proxy_url(_get_outbound_proxy_url()) or "-"
+                    logger.warning(
+                        "codex wham/usage: upstream request failed: user_id=%s account_id=%s attempt=%s url=%s proxy=%s error=%s",
+                        getattr(account, "user_id", "-"),
+                        getattr(account, "id", "-"),
+                        attempt,
+                        CODEX_WHAM_USAGE_URL,
+                        proxy_hint,
+                        type(e).__name__,
+                        exc_info=True,
+                    )
+
+                    tip = ""
+                    if isinstance(e, (httpx.ConnectTimeout, httpx.ConnectError)):
+                        tip = "；请检查网络/代理（可设置 CODEX_PROXY_URL，例如 http://host.docker.internal:7890）"
+                    raise ValueError(f"查询失败：上游请求异常（{type(e).__name__}）{tip}") from e
+
+                if 200 <= resp.status_code < 300:
+                    try:
+                        data = resp.json()
+                    except Exception as e:
+                        raise ValueError("查询失败：wham/usage 响应不是 JSON") from e
+                    if not isinstance(data, dict):
+                        raise ValueError("查询失败：wham/usage 响应格式异常")
+                    return data
+
+                now = _now_utc()
+                retry_at = _parse_retry_after(resp.headers, now=now)
+                try:
+                    raw_err = await resp.aread()
+                except Exception:
+                    raw_err = b""
+                err_text = raw_err.decode("utf-8", errors="replace") if raw_err else ""
+
+                if resp.status_code == 401 and attempt == 0:
+                    refreshed = await self._try_refresh_account(account, creds)
+                    if not refreshed:
+                        await self._disable_account(account, reason="auth_401")
+                        raise ValueError("账号 token 已失效（401），且无法 refresh_token 刷新（已禁用）")
+
+                    new_creds = self._load_account_credentials(account)
+                    creds.clear()
+                    creds.update(new_creds)
+                    access_token = _safe_str(creds.get("access_token"))
+                    if not access_token:
+                        await self._disable_account(account, reason="missing_access_token")
+                        raise ValueError("账号缺少 access_token（已禁用）")
+                    continue
+
+                if resp.status_code == 429:
+                    bucket = _infer_limit_bucket(err_text)
+                    await self._mark_rate_limited(account, bucket=bucket, retry_at=retry_at, raw_error=err_text)
+                    until = getattr(account, "frozen_until", None)
+                    if until:
+                        raise ValueError(f"账号触发限额，已冻结至：{_iso(until)}")
+                    raise ValueError("账号触发限额，已冻结")
+
+                err_compact = " ".join((err_text or "").split())
+                if err_compact:
+                    if len(err_compact) > 500:
+                        err_compact = err_compact[:500] + "..."
+                    raise ValueError(f"查询失败：HTTP {resp.status_code}：{err_compact}")
+                raise ValueError(f"查询失败：HTTP {resp.status_code}")
+
+        finally:
+            if resp is not None:
+                try:
+                    await resp.aclose()
+                except Exception:
+                    pass
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
     async def refresh_account_official(self, user_id: int, account_id: int) -> Dict[str, Any]:
         """
         从“官方上游”刷新并落库（尽量做到）：
-        - 5h/周限：通过一次轻量 `/backend-api/codex/responses` 请求拿响应头的 ratelimit 信息
+        - 5h/周限：优先调用 `/backend-api/wham/usage`；失败则 fallback 到 `/backend-api/codex/responses` 的轻量 ping（从响应头推断）
         - 余额：尝试调用 OpenAI billing credit_grants（可能因账号/权限差异不可用，失败则跳过）
-
-        注意：该动作会产生一次真实上游请求（但会立即关闭 SSE 连接）。
+        
+        注意：该动作会产生真实上游请求；但优先走 wham/usage，避免“刷新一次就消耗一次 codex 请求”。
         """
         account = await self.repo.get_by_id_and_user_id(account_id, user_id)
         if not account:
@@ -1113,6 +1419,75 @@ class CodexService:
         chatgpt_account_id = self._resolve_chatgpt_account_id(account, creds)
         if not chatgpt_account_id:
             raise ValueError("账号缺少 ChatGPT account_id")
+
+        # 1) 优先走 wham/usage：这是 ChatGPT 网页 Quota 页实际用的接口，不需要“发一次 ping 消耗一次请求”。
+        try:
+            wham_raw = await self._fetch_wham_usage_raw(
+                account,
+                creds,
+                access_token=access_token,
+                chatgpt_account_id=chatgpt_account_id,
+            )
+            now = _now_utc()
+            parsed = _parse_wham_usage(wham_raw, now=now)
+
+            rl = parsed.get("rate_limit") if isinstance(parsed, dict) else {}
+            if not isinstance(rl, dict):
+                rl = {}
+            five = rl.get("primary_window") if isinstance(rl.get("primary_window"), dict) else {}
+            week = rl.get("secondary_window") if isinstance(rl.get("secondary_window"), dict) else {}
+
+            p5 = five.get("used_percent") if isinstance(five, dict) else None
+            r5 = five.get("reset_at") if isinstance(five, dict) else None
+            pw = week.get("used_percent") if isinstance(week, dict) else None
+            rw = week.get("reset_at") if isinstance(week, dict) else None
+
+            if p5 is None and pw is None and not isinstance(r5, datetime) and not isinstance(rw, datetime):
+                raise ValueError("wham/usage 未返回限额窗口信息")
+
+            changed = False
+            if isinstance(p5, int):
+                account.limit_5h_used_percent = int(p5)
+                changed = True
+            if isinstance(r5, datetime):
+                account.limit_5h_reset_at = r5
+                changed = True
+            if isinstance(pw, int):
+                account.limit_week_used_percent = int(pw)
+                changed = True
+            if isinstance(rw, datetime):
+                account.limit_week_reset_at = rw
+                changed = True
+
+            if changed:
+                await self.db.flush()
+                await self.db.commit()
+
+            # 401 刷新 token 时，_fetch_wham_usage_raw 会把 creds 原地更新；这里同步一下给后续步骤用。
+            access_token = _safe_str(creds.get("access_token")) or access_token
+
+            quota = await self._fetch_official_quota(access_token)
+            if quota is not None:
+                remaining, currency = quota
+                account.quota_remaining = remaining
+                account.quota_currency = currency
+                account.quota_updated_at = now
+                await self.db.flush()
+                await self.db.commit()
+
+            updated = await self.repo.get_by_id_and_user_id(account_id, user_id)
+            return {"success": True, "data": updated or account}
+        except ValueError as e:
+            # 如果在 wham/usage 阶段已经把账号“冻结/禁用”了，就别再额外打 ping 了，直接把错误抛给前端。
+            access_token = _safe_str(creds.get("access_token")) or access_token
+            if int(getattr(account, "status", 1) or 1) == 0 or bool(getattr(account, "is_frozen", False)):
+                raise
+            logger.info(
+                "codex refresh: wham/usage failed, fallback to responses ping: user_id=%s account_id=%s error=%s",
+                user_id,
+                account_id,
+                str(e),
+            )
 
         ping_model = _pick_codex_ping_model(_get_supported_models())
         body = _normalize_codex_responses_request({"model": ping_model or "gpt-5.2-codex", "input": "ping"})
