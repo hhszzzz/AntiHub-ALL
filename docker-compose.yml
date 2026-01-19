@@ -16,7 +16,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+      - "${WEB_PORT:-3000}:3000"
     restart: unless-stopped
 
   backend:
