@@ -759,7 +759,7 @@ export interface PluginAPIKey {
   user_id: number;
   key_preview: string;
   name: string;
-  config_type: 'antigravity' | 'kiro' | 'qwen'; // 配置类型
+  config_type: 'antigravity' | 'kiro' | 'qwen' | 'codex'; // 配置类型
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;
@@ -771,7 +771,7 @@ export interface CreateAPIKeyResponse {
   user_id: number;
   key: string;
   name: string;
-  config_type: 'antigravity' | 'kiro' | 'qwen'; // 配置类型
+  config_type: 'antigravity' | 'kiro' | 'qwen' | 'codex'; // 配置类型
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;
@@ -802,7 +802,7 @@ export async function getAPIKeyInfo(): Promise<PluginAPIKey | null> {
  */
 export async function generateAPIKey(
   name: string = 'My API Key',
-  configType: 'antigravity' | 'kiro' | 'qwen' = 'antigravity'
+  configType: 'antigravity' | 'kiro' | 'qwen' | 'codex' = 'antigravity'
 ): Promise<CreateAPIKeyResponse> {
   return fetchWithAuth<CreateAPIKeyResponse>(
     `${API_BASE_URL}/api/api-keys`,
@@ -1015,7 +1015,7 @@ export async function getRequestUsageLogs(params?: {
 
 // ==================== 聊天相关 API ====================
 
-export type ApiType = 'antigravity' | 'kiro' | 'qwen';
+export type ApiType = 'antigravity' | 'kiro' | 'qwen' | 'codex';
 
 export interface OpenAIModel {
   id: string;
@@ -2090,6 +2090,14 @@ export async function getCodexAccountCredentials(accountId: number): Promise<Rec
   const result = await fetchWithAuth<{ success: boolean; data: Record<string, any> }>(
     `${API_BASE_URL}/api/codex/accounts/${accountId}/credentials`,
     { method: 'GET' }
+  );
+  return result.data;
+}
+
+export async function refreshCodexAccount(accountId: number): Promise<CodexAccount> {
+  const result = await fetchWithAuth<{ success: boolean; data: CodexAccount }>(
+    `${API_BASE_URL}/api/codex/accounts/${accountId}/refresh`,
+    { method: 'POST' }
   );
   return result.data;
 }

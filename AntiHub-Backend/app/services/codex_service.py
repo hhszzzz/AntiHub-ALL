@@ -12,11 +12,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 import base64
 import hashlib
 import json
 import secrets
+from uuid import uuid4
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -39,12 +40,24 @@ OPENAI_REDIRECT_URI = "http://localhost:1455/auth/callback"
 OAUTH_SCOPE = "openid email profile offline_access"
 OAUTH_SESSION_TTL_SECONDS = 10 * 60
 
+# 额度（余额）查询：不同环境/版本可能路径不同，这里做“多候选 + 尽量解析”。
+OPENAI_CREDIT_GRANTS_URLS = (
+    "https://api.openai.com/dashboard/billing/credit_grants",
+    "https://api.openai.com/v1/dashboard/billing/credit_grants",
+)
+
 
 SUPPORTED_MODELS = [
     "gpt-5.2-codex",
     "gpt-5.1-codex-max",
     "gpt-5-codex",
 ]
+
+CODEX_API_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_RESPONSES_URL = f"{CODEX_API_BASE_URL}/responses"
+CODEX_DEFAULT_VERSION = "0.21.0"
+CODEX_OPENAI_BETA = "responses=experimental"
+CODEX_DEFAULT_USER_AGENT = "codex_cli_rs/0.50.0 (AntiHub Proxy)"
 
 
 @dataclass(frozen=True)
@@ -196,6 +209,210 @@ def _extract_openai_profile_from_claims(claims: Dict[str, Any]) -> Dict[str, Opt
     }
 
 
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_retry_after(headers: httpx.Headers, *, now: datetime) -> Optional[datetime]:
+    """
+    解析 Retry-After，返回“预计可重试时间”（UTC）。
+    - 支持秒数（int）
+    - 支持 HTTP date（RFC1123）
+    """
+    ra = _safe_str(headers.get("Retry-After"))
+    if not ra:
+        return None
+
+    try:
+        seconds = int(ra)
+        if seconds < 0:
+            seconds = 0
+        return now + timedelta(seconds=seconds)
+    except Exception:
+        pass
+
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(ra)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _try_parse_int_header(value: Any) -> Optional[int]:
+    raw = _safe_str(value)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        pass
+    try:
+        return int(float(raw))
+    except Exception:
+        return None
+
+
+def _parse_reset_at(value: Any, *, now: datetime) -> Optional[datetime]:
+    raw = _safe_str(value)
+    if not raw:
+        return None
+
+    # seconds-from-now (int/float) or unix timestamp
+    try:
+        num = float(raw)
+        if num > 1_000_000_000:
+            return datetime.fromtimestamp(num, tz=timezone.utc)
+        if num < 0:
+            num = 0
+        return now + timedelta(seconds=num)
+    except Exception:
+        pass
+
+    # HTTP date
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(raw)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    # ISO8601
+    dt = _parse_iso_datetime(raw)
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def _detect_ratelimit_bucket(header_key: str) -> Optional[str]:
+    k = (header_key or "").lower()
+    if any(t in k for t in ("5h", "5-hour", "5hours", "5hour", "five_hour", "five-hour")):
+        return "5h"
+    if any(t in k for t in ("week", "weekly", "7d", "7-day", "7day", "7days", "168h")):
+        return "week"
+    return None
+
+
+def _compute_used_percent(limit_value: Optional[int], remaining_value: Optional[int]) -> Optional[int]:
+    if limit_value is None or remaining_value is None:
+        return None
+    if limit_value <= 0:
+        return None
+    remaining = max(0, min(int(limit_value), int(remaining_value)))
+    used_ratio = (limit_value - remaining) / float(limit_value)
+    pct = int(round(used_ratio * 100))
+    return max(0, min(100, pct))
+
+
+def _extract_ratelimit_snapshot(headers: httpx.Headers, *, now: datetime) -> Dict[str, Dict[str, Optional[Any]]]:
+    buckets: Dict[str, Dict[str, Optional[Any]]] = {
+        "5h": {"limit": None, "remaining": None, "reset_at": None},
+        "week": {"limit": None, "remaining": None, "reset_at": None},
+        "default": {"limit": None, "remaining": None, "reset_at": None},
+    }
+
+    for key, value in headers.items():
+        lk = (key or "").lower()
+        if "ratelimit" not in lk:
+            continue
+
+        bucket = _detect_ratelimit_bucket(lk) or "default"
+        target = buckets.get(bucket) or buckets["default"]
+
+        if "reset" in lk:
+            parsed = _parse_reset_at(value, now=now)
+            if parsed is not None:
+                target["reset_at"] = parsed
+            continue
+
+        # 避免把 token/tpm 之类当成 5h/周限
+        if any(t in lk for t in ("token", "tpm")):
+            continue
+
+        if "remaining" in lk:
+            parsed = _try_parse_int_header(value)
+            if parsed is not None:
+                target["remaining"] = parsed
+        elif "limit" in lk:
+            parsed = _try_parse_int_header(value)
+            if parsed is not None:
+                target["limit"] = parsed
+
+    # 如果上游只给了一组（无 bucket），默认当作 5h
+    if buckets["5h"]["limit"] is None and buckets["default"]["limit"] is not None:
+        buckets["5h"]["limit"] = buckets["default"]["limit"]
+    if buckets["5h"]["remaining"] is None and buckets["default"]["remaining"] is not None:
+        buckets["5h"]["remaining"] = buckets["default"]["remaining"]
+    if buckets["5h"]["reset_at"] is None and buckets["default"]["reset_at"] is not None:
+        buckets["5h"]["reset_at"] = buckets["default"]["reset_at"]
+
+    return buckets
+
+
+def _infer_limit_bucket(error_text: str) -> str:
+    """
+    尝试从错误文案推断是 5h 还是 week。
+    返回：'week' | '5h'
+    """
+    text = (error_text or "").lower()
+    if any(k in text for k in ("week", "weekly", "per week", "7 day", "7-day", "7day")):
+        return "week"
+    if any(k in text for k in ("5h", "5 h", "5-hour", "5 hour", "5hours", "5 hours")):
+        return "5h"
+    return "5h"
+
+
+def _normalize_codex_responses_request(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Codex 上游是 responses SSE（CLIProxyAPI 也会强制 stream=true）。
+    这里做最小“清洗/补齐”，避免上游因字段形态不一致而拒绝。
+    """
+    body = dict(request_data or {})
+    body["stream"] = True
+    body.pop("previous_response_id", None)
+    body.pop("prompt_cache_retention", None)
+    body.pop("safety_identifier", None)
+    if "instructions" not in body:
+        body["instructions"] = ""
+    return body
+
+
+def _build_codex_headers(
+    *,
+    access_token: str,
+    chatgpt_account_id: str,
+    user_agent: Optional[str],
+) -> Dict[str, str]:
+    ua = (user_agent or "").strip() or CODEX_DEFAULT_USER_AGENT
+    session_id = uuid4().hex
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "text/event-stream",
+        "Connection": "Keep-Alive",
+        "Version": CODEX_DEFAULT_VERSION,
+        "Openai-Beta": CODEX_OPENAI_BETA,
+        "Session_id": session_id,
+        "User-Agent": ua,
+        "Originator": "codex_cli_rs",
+    }
+    if chatgpt_account_id:
+        headers["Chatgpt-Account-Id"] = chatgpt_account_id
+    return headers
+
+
 class CodexService:
     def __init__(self, db: AsyncSession, redis: RedisClient):
         self.db = db
@@ -207,6 +424,12 @@ class CodexService:
             "success": True,
             "data": {"models": [{"id": m, "object": "model"} for m in SUPPORTED_MODELS], "object": "list"},
         }
+
+    async def openai_list_models(self) -> Dict[str, Any]:
+        """
+        `/v1/models` 兼容格式（OpenAI 标准）：{ object: "list", data: [...] }
+        """
+        return {"object": "list", "data": [{"id": m, "object": "model"} for m in SUPPORTED_MODELS]}
 
     async def create_oauth_authorize_url(
         self,
@@ -480,6 +703,134 @@ class CodexService:
             credential_obj = {"raw": decrypted}
         return {"success": True, "data": credential_obj}
 
+    async def open_codex_responses_stream(
+        self,
+        user_id: int,
+        request_data: Dict[str, Any],
+        *,
+        user_agent: Optional[str] = None,
+    ) -> Tuple[httpx.AsyncClient, httpx.Response, Any]:
+        """
+        打开到 `chatgpt.com/backend-api/codex/responses` 的 SSE 连接。
+
+        - 账号选择：fill-first（先用第一个号，满了/冻结/禁用才换下一个）
+        - 429：自动落库限额字段并切换下一个账号
+        - 401：尝试刷新 token；失败则跳过该账号
+
+        返回：
+        - client: httpx.AsyncClient（由调用方负责 aclose）
+        - resp: httpx.Response(stream=True)（由调用方负责 aclose）
+        - account: 选中的 CodexAccount ORM 实例（仅用于标识/展示）
+        """
+        if not isinstance(request_data, dict):
+            raise ValueError("request_data 必须是 JSON object")
+
+        exclude_ids: Set[int] = set()
+        last_error: Optional[str] = None
+
+        while True:
+            selected = await self._select_active_account_obj(user_id, exclude_ids=exclude_ids)
+            if selected is None:
+                raise ValueError(last_error or "没有可用的 Codex 账号")
+
+            exclude_ids.add(int(getattr(selected, "id", 0) or 0))
+
+            body = _normalize_codex_responses_request(request_data)
+            creds = self._load_account_credentials(selected)
+            creds = await self._ensure_account_tokens(selected, creds)
+
+            access_token = _safe_str(creds.get("access_token"))
+            if not access_token:
+                last_error = "账号缺少 access_token"
+                await self._disable_account(selected, reason="missing_access_token")
+                continue
+
+            chatgpt_account_id = self._resolve_chatgpt_account_id(selected, creds)
+            if not chatgpt_account_id:
+                last_error = "账号缺少 ChatGPT account_id（无法设置 Chatgpt-Account-Id）"
+                await self._disable_account(selected, reason="missing_account_id")
+                continue
+
+            headers = _build_codex_headers(
+                access_token=access_token,
+                chatgpt_account_id=chatgpt_account_id,
+                user_agent=user_agent,
+            )
+
+            client = httpx.AsyncClient(timeout=None)
+            try:
+                req = client.build_request("POST", CODEX_RESPONSES_URL, json=body, headers=headers)
+                resp = await client.send(req, stream=True)
+            except Exception:
+                await client.aclose()
+                raise
+
+            if 200 <= resp.status_code < 300:
+                await self._update_account_after_success(selected, resp.headers)
+                return client, resp, selected
+
+            now = _now_utc()
+            retry_at = _parse_retry_after(resp.headers, now=now)
+            raw_err = await resp.aread()
+            await resp.aclose()
+            await client.aclose()
+
+            err_text = ""
+            try:
+                err_text = raw_err.decode("utf-8", errors="replace")
+            except Exception:
+                err_text = str(raw_err)
+
+            if resp.status_code == 429:
+                bucket = _infer_limit_bucket(err_text)
+                await self._mark_rate_limited(selected, bucket=bucket, retry_at=retry_at, raw_error=err_text)
+                last_error = "账号触发限额，已自动切换下一个账号"
+                continue
+
+            if resp.status_code == 401:
+                refreshed = await self._try_refresh_account(selected, creds)
+                if refreshed:
+                    last_error = "token 已刷新，重试该账号"
+                    exclude_ids.discard(int(getattr(selected, "id", 0) or 0))
+                    continue
+                await self._disable_account(selected, reason="unauthorized")
+                last_error = "账号未授权（已禁用），已自动切换下一个账号"
+                continue
+
+            # 其他错误：不做轮询，直接抛出
+            raise httpx.HTTPStatusError(
+                f"Codex 上游错误: HTTP {resp.status_code}",
+                request=None,
+                response=type(
+                    "R",
+                    (),
+                    {"status_code": resp.status_code, "text": err_text, "headers": resp.headers},
+                )(),
+            )
+
+    async def execute_codex_responses(
+        self,
+        user_id: int,
+        request_data: Dict[str, Any],
+        *,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        非流式：内部仍以 stream=true 请求上游，然后从 SSE 里提取 response.completed。
+        返回 OpenAI `/v1/responses` 的 response object（不是 event wrapper）。
+        """
+        client, resp, _account = await self.open_codex_responses_stream(user_id, request_data, user_agent=user_agent)
+        try:
+            data = await resp.aread()
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+        response_obj = self._extract_response_object_from_sse(data)
+        if not response_obj:
+            raise ValueError("Codex 上游未返回 response.completed")
+        return response_obj
+
     async def update_account_status(self, user_id: int, account_id: int, status: int) -> Dict[str, Any]:
         if status not in (0, 1):
             raise ValueError("status 必须是 0 或 1")
@@ -575,11 +926,149 @@ class CodexService:
             raise ValueError("账号不存在")
         return {"success": True, "data": account}
 
+    async def refresh_account_official(self, user_id: int, account_id: int) -> Dict[str, Any]:
+        """
+        从“官方上游”刷新并落库（尽量做到）：
+        - 5h/周限：通过一次轻量 `/backend-api/codex/responses` 请求拿响应头的 ratelimit 信息
+        - 余额：尝试调用 OpenAI billing credit_grants（可能因账号/权限差异不可用，失败则跳过）
+
+        注意：该动作会产生一次真实上游请求（但会立即关闭 SSE 连接）。
+        """
+        account = await self.repo.get_by_id_and_user_id(account_id, user_id)
+        if not account:
+            raise ValueError("账号不存在")
+
+        creds = self._load_account_credentials(account)
+        creds = await self._ensure_account_tokens(account, creds)
+
+        access_token = _safe_str(creds.get("access_token"))
+        if not access_token:
+            raise ValueError("账号缺少 access_token")
+
+        chatgpt_account_id = self._resolve_chatgpt_account_id(account, creds)
+        if not chatgpt_account_id:
+            raise ValueError("账号缺少 ChatGPT account_id")
+
+        body = _normalize_codex_responses_request(
+            {"model": SUPPORTED_MODELS[0], "input": "ping", "max_output_tokens": 1}
+        )
+
+        client = httpx.AsyncClient(timeout=20.0)
+        resp: Optional[httpx.Response] = None
+        try:
+            # 最多重试 1 次：401 时尝试 refresh_token 刷新再打一次
+            for attempt in range(2):
+                headers = _build_codex_headers(
+                    access_token=access_token,
+                    chatgpt_account_id=chatgpt_account_id,
+                    user_agent=None,
+                )
+                req = client.build_request("POST", CODEX_RESPONSES_URL, json=body, headers=headers)
+                resp = await client.send(req, stream=True)
+
+                if 200 <= resp.status_code < 300:
+                    await self._update_account_after_success(account, resp.headers)
+                    break
+
+                now = _now_utc()
+                retry_at = _parse_retry_after(resp.headers, now=now)
+                raw_err = await resp.aread()
+                err_text = ""
+                try:
+                    err_text = raw_err.decode("utf-8", errors="replace")
+                except Exception:
+                    err_text = str(raw_err)
+
+                if resp.status_code == 401 and attempt == 0:
+                    try:
+                        await resp.aclose()
+                    except Exception:
+                        pass
+                    resp = None
+
+                    refreshed = await self._try_refresh_account(account, creds)
+                    if not refreshed:
+                        await self._disable_account(account, reason="unauthorized")
+                        raise ValueError("账号未授权（已禁用）")
+
+                    creds = self._load_account_credentials(account)
+                    access_token = _safe_str(creds.get("access_token"))
+                    if not access_token:
+                        await self._disable_account(account, reason="missing_access_token")
+                        raise ValueError("账号缺少 access_token（已禁用）")
+
+                    continue
+
+                if resp.status_code == 429:
+                    bucket = _infer_limit_bucket(err_text)
+                    await self._mark_rate_limited(account, bucket=bucket, retry_at=retry_at, raw_error=err_text)
+                    until = getattr(account, "frozen_until", None)
+                    if until:
+                        raise ValueError(f"账号触发限额，已冻结至：{_iso(until)}")
+                    raise ValueError("账号触发限额，已冻结")
+
+                raise ValueError(f"刷新失败：HTTP {resp.status_code}")
+
+        finally:
+            if resp is not None:
+                try:
+                    await resp.aclose()
+                except Exception:
+                    pass
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+        quota = await self._fetch_official_quota(access_token)
+        if quota is not None:
+            remaining, currency = quota
+            now = _now_utc()
+            account.quota_remaining = remaining
+            account.quota_currency = currency
+            account.quota_updated_at = now
+            await self.db.flush()
+            await self.db.commit()
+
+        updated = await self.repo.get_by_id_and_user_id(account_id, user_id)
+        return {"success": True, "data": updated or account}
+
     async def delete_account(self, user_id: int, account_id: int) -> Dict[str, Any]:
         ok = await self.repo.delete(account_id, user_id)
         if not ok:
             raise ValueError("账号不存在")
         return {"success": True, "data": {"deleted": True}}
+
+    async def _fetch_official_quota(self, access_token: str) -> Optional[Tuple[float, str]]:
+        token = (access_token or "").strip()
+        if not token:
+            return None
+
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for url in OPENAI_CREDIT_GRANTS_URLS:
+                try:
+                    resp = await client.get(url, headers=headers)
+                except Exception:
+                    continue
+                if resp.status_code != 200:
+                    continue
+                try:
+                    data = resp.json()
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                total_available = data.get("total_available")
+                if total_available is None:
+                    continue
+                try:
+                    remaining = float(total_available)
+                except Exception:
+                    continue
+                # credit_grants 接口通常不返回 currency；这里默认 USD
+                return remaining, "USD"
+        return None
 
     async def _exchange_code_for_tokens(self, *, code: str, code_verifier: str) -> Dict[str, Any]:
         form = {
@@ -605,3 +1094,214 @@ class CodexService:
         if not isinstance(data, dict):
             raise ValueError("token 响应格式异常")
         return data
+
+    def _load_account_credentials(self, account: Any) -> Dict[str, Any]:
+        decrypted = decrypt_secret(account.credentials)
+        try:
+            obj = json.loads(decrypted)
+        except Exception:
+            obj = {}
+        return obj if isinstance(obj, dict) else {}
+
+    def _resolve_chatgpt_account_id(self, account: Any, creds: Dict[str, Any]) -> str:
+        # 优先用落库字段
+        candidate = _safe_str(getattr(account, "openai_account_id", None) or "")
+        if candidate:
+            return candidate
+
+        candidate = _safe_str(creds.get("account_id"))
+        if candidate:
+            return candidate
+
+        # 兜底：尝试从 token claims 里捞（不验签，仅用于提取字段）
+        for token_key in ("id_token", "access_token"):
+            tok = _safe_str(creds.get(token_key))
+            if not tok:
+                continue
+            claims = _decode_id_token(tok)
+            profile = _extract_openai_profile_from_claims(claims)
+            candidate = _safe_str(profile.get("openai_account_id"))
+            if candidate:
+                return candidate
+
+        return ""
+
+    async def _refresh_tokens(self, refresh_token: str) -> Dict[str, Any]:
+        form = {
+            "client_id": OPENAI_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": "openid profile email",
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                OPENAI_TOKEN_URL,
+                data=form,
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            )
+        if resp.status_code != 200:
+            raise ValueError(f"token 刷新失败: HTTP {resp.status_code}")
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("token 刷新响应格式异常")
+        return data
+
+    async def _try_refresh_account(self, account: Any, creds: Dict[str, Any]) -> bool:
+        refresh_token = _safe_str(creds.get("refresh_token"))
+        if not refresh_token:
+            return False
+        try:
+            token_resp = await self._refresh_tokens(refresh_token)
+        except Exception:
+            return False
+
+        now = _now_utc()
+        expires_at = now + timedelta(seconds=int(token_resp.get("expires_in") or 0))
+        id_token = _safe_str(token_resp.get("id_token"))
+        claims = _decode_id_token(id_token)
+        profile = _extract_openai_profile_from_claims(claims)
+
+        storage_payload = {
+            "id_token": id_token,
+            "access_token": _safe_str(token_resp.get("access_token")),
+            "refresh_token": _safe_str(token_resp.get("refresh_token")) or refresh_token,
+            "account_id": profile.get("openai_account_id") or _safe_str(creds.get("account_id")) or "",
+            "last_refresh": _iso(now),
+            "email": profile.get("email") or _safe_str(creds.get("email")) or "",
+            "type": "codex",
+            "expired": _iso(expires_at),
+        }
+
+        encrypted_credentials = encrypt_secret(json.dumps(storage_payload, ensure_ascii=False))
+        await self.repo.update_credentials_and_profile(
+            account.id,
+            account.user_id,
+            credentials=encrypted_credentials,
+            email=profile.get("email") or None,
+            openai_account_id=profile.get("openai_account_id") or None,
+            chatgpt_plan_type=profile.get("chatgpt_plan_type") or None,
+            token_expires_at=expires_at,
+            last_refresh_at=now,
+        )
+        await self.db.flush()
+        await self.db.commit()
+        return True
+
+    async def _ensure_account_tokens(self, account: Any, creds: Dict[str, Any]) -> Dict[str, Any]:
+        now = _now_utc()
+        expires_at = getattr(account, "token_expires_at", None)
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at > now + timedelta(seconds=60):
+                return creds
+
+        refreshed = await self._try_refresh_account(account, creds)
+        if not refreshed:
+            return creds
+        return self._load_account_credentials(account)
+
+    async def _disable_account(self, account: Any, *, reason: str) -> None:
+        _ = reason
+        try:
+            account.status = 0
+            await self.db.flush()
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+
+    async def _mark_rate_limited(
+        self,
+        account: Any,
+        *,
+        bucket: str,
+        retry_at: Optional[datetime],
+        raw_error: str,
+    ) -> None:
+        """
+        把“触发限额”的账号冻结到 retry_at。
+        说明：目前只做最小落库，不做复杂解析（官方通常会给 Retry-After）。
+        """
+        _ = raw_error
+        now = _now_utc()
+        if retry_at is None:
+            retry_at = now + (timedelta(days=7) if bucket == "week" else timedelta(hours=5))
+
+        if bucket == "week":
+            account.limit_week_used_percent = 100
+            account.limit_week_reset_at = retry_at
+        else:
+            account.limit_5h_used_percent = 100
+            account.limit_5h_reset_at = retry_at
+
+        await self.db.flush()
+        await self.db.commit()
+
+    async def _update_account_after_success(self, account: Any, headers: httpx.Headers) -> None:
+        """
+        从上游响应头尽量同步限额信息，并更新 last_used_at。
+
+        说明：这里不做强依赖；拿不到就跳过，不影响主调用链路。
+        """
+        now = _now_utc()
+        try:
+            account.last_used_at = now
+
+            snapshot = _extract_ratelimit_snapshot(headers, now=now)
+            five = snapshot.get("5h") or {}
+            week = snapshot.get("week") or {}
+
+            p5 = _compute_used_percent(five.get("limit"), five.get("remaining"))
+            r5 = five.get("reset_at")
+            if p5 is not None and not (p5 >= 100 and r5 is None):
+                account.limit_5h_used_percent = int(p5)
+            if isinstance(r5, datetime):
+                account.limit_5h_reset_at = r5
+
+            pw = _compute_used_percent(week.get("limit"), week.get("remaining"))
+            rw = week.get("reset_at")
+            if pw is not None and not (pw >= 100 and rw is None):
+                account.limit_week_used_percent = int(pw)
+            if isinstance(rw, datetime):
+                account.limit_week_reset_at = rw
+
+            await self.db.flush()
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+
+    async def _select_active_account_obj(self, user_id: int, *, exclude_ids: Set[int]) -> Optional[Any]:
+        enabled = await self.repo.list_enabled_by_user_id(user_id)
+        for account in enabled:
+            if int(getattr(account, "id", 0) or 0) in exclude_ids:
+                continue
+            if getattr(account, "effective_status", 0) == 1:
+                return account
+        return None
+
+    def _extract_response_object_from_sse(self, raw: bytes) -> Optional[Dict[str, Any]]:
+        if not raw:
+            return None
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("data:"):
+                continue
+            payload_str = stripped[5:].strip()
+            if not payload_str or payload_str == "[DONE]":
+                continue
+            try:
+                payload = json.loads(payload_str)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("type") == "response.completed":
+                resp = payload.get("response")
+                if isinstance(resp, dict):
+                    return resp
+        return None

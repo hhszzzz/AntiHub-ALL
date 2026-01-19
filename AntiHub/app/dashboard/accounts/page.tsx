@@ -29,8 +29,7 @@ import {
   deleteCodexAccount,
   updateCodexAccountStatus,
   updateCodexAccountName,
-  updateCodexAccountQuota,
-  updateCodexAccountLimits,
+  refreshCodexAccount,
   type Account,
   type AccountProjects,
   type AntigravityAccountDetail,
@@ -98,6 +97,7 @@ export default function AccountsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshingCookieId, setRefreshingCookieId] = useState<string | null>(null);
+  const [refreshingCodexAccountId, setRefreshingCodexAccountId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex'>('antigravity');
 
   // 添加账号 Drawer 状态
@@ -141,22 +141,6 @@ export default function AccountsPage() {
   const [renamingCodexAccount, setRenamingCodexAccount] = useState<CodexAccount | null>(null);
   const [newCodexAccountName, setNewCodexAccountName] = useState('');
   const [isRenamingCodex, setIsRenamingCodex] = useState(false);
-
-  // Codex 额度设置 Dialog 状态
-  const [isCodexQuotaDialogOpen, setIsCodexQuotaDialogOpen] = useState(false);
-  const [quotaEditingCodexAccount, setQuotaEditingCodexAccount] = useState<CodexAccount | null>(null);
-  const [codexQuotaRemainingInput, setCodexQuotaRemainingInput] = useState('');
-  const [codexQuotaCurrencyInput, setCodexQuotaCurrencyInput] = useState('');
-  const [isUpdatingCodexQuota, setIsUpdatingCodexQuota] = useState(false);
-
-  // Codex 限额设置 Dialog 状态（5小时/周限）
-  const [isCodexLimitsDialogOpen, setIsCodexLimitsDialogOpen] = useState(false);
-  const [limitsEditingCodexAccount, setLimitsEditingCodexAccount] = useState<CodexAccount | null>(null);
-  const [codexLimit5hUsedInput, setCodexLimit5hUsedInput] = useState('');
-  const [codexLimit5hResetAtInput, setCodexLimit5hResetAtInput] = useState('');
-  const [codexLimitWeekUsedInput, setCodexLimitWeekUsedInput] = useState('');
-  const [codexLimitWeekResetAtInput, setCodexLimitWeekResetAtInput] = useState('');
-  const [isUpdatingCodexLimits, setIsUpdatingCodexLimits] = useState(false);
 
   // Antigravity 账号详情 Dialog 状态
   const [isAntigravityDetailDialogOpen, setIsAntigravityDetailDialogOpen] = useState(false);
@@ -895,207 +879,32 @@ export default function AccountsPage() {
     }
   };
 
-  const handleEditCodexQuota = (account: CodexAccount) => {
-    setQuotaEditingCodexAccount(account);
-    setCodexQuotaRemainingInput(
-      account.quota_remaining === null || account.quota_remaining === undefined
-        ? ''
-        : String(account.quota_remaining)
-    );
-    setCodexQuotaCurrencyInput(account.quota_currency || '');
-    setIsCodexQuotaDialogOpen(true);
-  };
-
-  const handleSubmitCodexQuota = async () => {
-    if (!quotaEditingCodexAccount) return;
-
-    const remainingRaw = codexQuotaRemainingInput.trim();
-    const currencyRaw = codexQuotaCurrencyInput.trim();
-
-    let quotaRemaining: number | null | undefined = null;
-    if (remainingRaw !== '') {
-      const parsed = Number(remainingRaw);
-      if (!Number.isFinite(parsed)) {
-        toasterRef.current?.show({
-          title: '输入错误',
-          message: '剩余额度必须是数字',
-          variant: 'warning',
-          position: 'top-right',
-        });
-        return;
-      }
-      quotaRemaining = parsed;
-    }
-
-    const quotaCurrency = currencyRaw ? currencyRaw : null;
-
-    setIsUpdatingCodexQuota(true);
+  const handleRefreshCodexOfficial = async (account: CodexAccount) => {
+    const accountId = account.account_id;
+    setRefreshingCodexAccountId(accountId);
     try {
-      const updated = await updateCodexAccountQuota(quotaEditingCodexAccount.account_id, {
-        quota_remaining: quotaRemaining,
-        quota_currency: quotaCurrency,
-      });
+      const updated = await refreshCodexAccount(accountId);
       setCodexAccounts(
-        codexAccounts.map((a) =>
-          a.account_id === quotaEditingCodexAccount.account_id ? { ...a, ...updated } : a
-        )
+        codexAccounts.map((a) => (a.account_id === accountId ? { ...a, ...updated } : a))
       );
-      setIsCodexQuotaDialogOpen(false);
+      if (detailCodexAccount && detailCodexAccount.account_id === accountId) {
+        setDetailCodexAccount({ ...detailCodexAccount, ...updated });
+      }
       toasterRef.current?.show({
-        title: '更新成功',
-        message: '额度信息已更新',
+        title: '刷新成功',
+        message: '已从官方刷新额度/限额',
         variant: 'success',
         position: 'top-right',
       });
     } catch (err) {
       toasterRef.current?.show({
-        title: '更新失败',
-        message: err instanceof Error ? err.message : '更新额度失败',
+        title: '刷新失败',
+        message: err instanceof Error ? err.message : '刷新账号信息失败',
         variant: 'error',
         position: 'top-right',
       });
     } finally {
-      setIsUpdatingCodexQuota(false);
-    }
-  };
-
-  const formatDateTimeLocalValue = (iso?: string | null) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    const mm = pad(d.getMonth() + 1);
-    const dd = pad(d.getDate());
-    const hh = pad(d.getHours());
-    const min = pad(d.getMinutes());
-    return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
-  };
-
-  const handleEditCodexLimits = (account: CodexAccount) => {
-    setLimitsEditingCodexAccount(account);
-    setCodexLimit5hUsedInput(
-      account.limit_5h_used_percent === null || account.limit_5h_used_percent === undefined
-        ? ''
-        : String(account.limit_5h_used_percent)
-    );
-    setCodexLimit5hResetAtInput(formatDateTimeLocalValue(account.limit_5h_reset_at));
-    setCodexLimitWeekUsedInput(
-      account.limit_week_used_percent === null || account.limit_week_used_percent === undefined
-        ? ''
-        : String(account.limit_week_used_percent)
-    );
-    setCodexLimitWeekResetAtInput(formatDateTimeLocalValue(account.limit_week_reset_at));
-    setIsCodexLimitsDialogOpen(true);
-  };
-
-  const handleSubmitCodexLimits = async () => {
-    if (!limitsEditingCodexAccount) return;
-
-    const p5Raw = codexLimit5hUsedInput.trim();
-    const pwRaw = codexLimitWeekUsedInput.trim();
-    const r5Raw = codexLimit5hResetAtInput.trim();
-    const rwRaw = codexLimitWeekResetAtInput.trim();
-
-    const parsePercent = (raw: string, label: string): number | null => {
-      if (!raw) return null;
-      const parsed = Number(raw);
-      if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
-        throw new Error(`${label}必须是整数`);
-      }
-      if (parsed < 0 || parsed > 100) {
-        throw new Error(`${label}必须在 0-100 之间`);
-      }
-      return parsed;
-    };
-
-    let p5: number | null = null;
-    let pw: number | null = null;
-    try {
-      p5 = parsePercent(p5Raw, '5小时限额已用%');
-      pw = parsePercent(pwRaw, '周限额已用%');
-    } catch (e) {
-      toasterRef.current?.show({
-        title: '输入错误',
-        message: e instanceof Error ? e.message : '限额输入有误',
-        variant: 'warning',
-        position: 'top-right',
-      });
-      return;
-    }
-
-    const toIso = (raw: string): string | null => {
-      if (!raw) return null;
-      const d = new Date(raw);
-      if (Number.isNaN(d.getTime())) {
-        throw new Error('重置时间格式不正确');
-      }
-      return d.toISOString();
-    };
-
-    let r5: string | null = null;
-    let rw: string | null = null;
-    try {
-      r5 = toIso(r5Raw);
-      rw = toIso(rwRaw);
-    } catch (e) {
-      toasterRef.current?.show({
-        title: '输入错误',
-        message: e instanceof Error ? e.message : '重置时间输入有误',
-        variant: 'warning',
-        position: 'top-right',
-      });
-      return;
-    }
-
-    if (p5 !== null && p5 >= 100 && !r5) {
-      toasterRef.current?.show({
-        title: '输入错误',
-        message: '5小时已用=100 时必须填写 5小时重置时间',
-        variant: 'warning',
-        position: 'top-right',
-      });
-      return;
-    }
-    if (pw !== null && pw >= 100 && !rw) {
-      toasterRef.current?.show({
-        title: '输入错误',
-        message: '周限额已用=100 时必须填写 周限额重置时间',
-        variant: 'warning',
-        position: 'top-right',
-      });
-      return;
-    }
-
-    setIsUpdatingCodexLimits(true);
-    try {
-      const updated = await updateCodexAccountLimits(limitsEditingCodexAccount.account_id, {
-        limit_5h_used_percent: p5,
-        limit_5h_reset_at: r5,
-        limit_week_used_percent: pw,
-        limit_week_reset_at: rw,
-      });
-      setCodexAccounts(
-        codexAccounts.map((a) =>
-          a.account_id === limitsEditingCodexAccount.account_id ? { ...a, ...updated } : a
-        )
-      );
-      setIsCodexLimitsDialogOpen(false);
-      toasterRef.current?.show({
-        title: '更新成功',
-        message: '限额信息已更新',
-        variant: 'success',
-        position: 'top-right',
-      });
-    } catch (err) {
-      toasterRef.current?.show({
-        title: '更新失败',
-        message: err instanceof Error ? err.message : '更新限额失败',
-        variant: 'error',
-        position: 'top-right',
-      });
-    } finally {
-      setIsUpdatingCodexLimits(false);
+      setRefreshingCodexAccountId(null);
     }
   };
 
@@ -1747,8 +1556,6 @@ export default function AccountsPage() {
                         <TableHead className="min-w-[120px]">5小时/周限</TableHead>
                         <TableHead className="min-w-[180px]">解冻时间</TableHead>
                         <TableHead className="min-w-[180px]">Token过期</TableHead>
-                        <TableHead className="min-w-[140px]">剩余额度</TableHead>
-                        <TableHead className="min-w-[180px]">额度更新时间</TableHead>
                         <TableHead className="min-w-[180px]">添加时间</TableHead>
                         <TableHead className="text-right min-w-[80px]">操作</TableHead>
                       </TableRow>
@@ -1793,16 +1600,6 @@ export default function AccountsPage() {
                               ? new Date(account.token_expires_at).toLocaleString('zh-CN')
                               : '-'}
                           </TableCell>
-                          <TableCell className="font-mono text-sm whitespace-nowrap">
-                            {account.quota_remaining === null || account.quota_remaining === undefined
-                              ? '-'
-                              : `${Number(account.quota_remaining).toFixed(2)}${account.quota_currency ? ` ${account.quota_currency}` : ''}`}
-                          </TableCell>
-                          <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
-                            {account.quota_updated_at
-                              ? new Date(account.quota_updated_at).toLocaleString('zh-CN')
-                              : '-'}
-                          </TableCell>
                           <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
                             {account.created_at ? new Date(account.created_at).toLocaleString('zh-CN') : '-'}
                           </TableCell>
@@ -1818,13 +1615,12 @@ export default function AccountsPage() {
                                   <IconExternalLink className="size-4 mr-2" />
                                   详细信息
                                 </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handleEditCodexQuota(account)}>
-                                  <IconChartBar className="size-4 mr-2" />
-                                  设置额度
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => handleEditCodexLimits(account)}>
-                                  <IconAlertTriangle className="size-4 mr-2" />
-                                  设置限额
+                                <DropdownMenuItem
+                                  onClick={() => handleRefreshCodexOfficial(account)}
+                                  disabled={refreshingCodexAccountId === account.account_id}
+                                >
+                                  <IconRefresh className="size-4 mr-2" />
+                                  {refreshingCodexAccountId === account.account_id ? '刷新中...' : '刷新官方额度/限额'}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleCopyCodexCredentials(account)}>
                                   <IconCopy className="size-4 mr-2" />
@@ -2095,189 +1891,6 @@ export default function AccountsPage() {
               disabled={isRenamingCodex || !newCodexAccountName.trim()}
             >
               {isRenamingCodex ? (
-                <>
-                  <MorphingSquare className="size-4 mr-2" />
-                  保存中...
-                </>
-              ) : (
-                '保存'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Codex 额度设置 Dialog */}
-      <Dialog
-        open={isCodexQuotaDialogOpen}
-        onOpenChange={(open) => {
-          setIsCodexQuotaDialogOpen(open);
-          if (!open) {
-            setQuotaEditingCodexAccount(null);
-            setCodexQuotaRemainingInput('');
-            setCodexQuotaCurrencyInput('');
-            setIsUpdatingCodexQuota(false);
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-[460px]">
-          <DialogHeader>
-            <DialogTitle>设置剩余额度</DialogTitle>
-            <DialogDescription className="break-all">
-              {quotaEditingCodexAccount
-                ? `账号ID: ${quotaEditingCodexAccount.account_id}`
-                : '请选择要设置额度的账号'}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="codex-quota-remaining">剩余额度</Label>
-              <Input
-                id="codex-quota-remaining"
-                placeholder="例如 50"
-                value={codexQuotaRemainingInput}
-                onChange={(e) => setCodexQuotaRemainingInput(e.target.value)}
-                disabled={isUpdatingCodexQuota}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="codex-quota-currency">币种/单位</Label>
-              <Input
-                id="codex-quota-currency"
-                placeholder="例如 USD"
-                value={codexQuotaCurrencyInput}
-                onChange={(e) => setCodexQuotaCurrencyInput(e.target.value)}
-                maxLength={16}
-                disabled={isUpdatingCodexQuota}
-              />
-              <p className="text-xs text-muted-foreground">
-                备注：这里是手动维护字段，仅用于展示与本地落库。
-              </p>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setIsCodexQuotaDialogOpen(false)}
-              disabled={isUpdatingCodexQuota}
-            >
-              取消
-            </Button>
-            <Button
-              onClick={handleSubmitCodexQuota}
-              disabled={isUpdatingCodexQuota || !quotaEditingCodexAccount}
-            >
-              {isUpdatingCodexQuota ? (
-                <>
-                  <MorphingSquare className="size-4 mr-2" />
-                  保存中...
-                </>
-              ) : (
-                '保存'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Codex 限额设置 Dialog */}
-      <Dialog
-        open={isCodexLimitsDialogOpen}
-        onOpenChange={(open) => {
-          setIsCodexLimitsDialogOpen(open);
-          if (!open) {
-            setLimitsEditingCodexAccount(null);
-            setCodexLimit5hUsedInput('');
-            setCodexLimit5hResetAtInput('');
-            setCodexLimitWeekUsedInput('');
-            setCodexLimitWeekResetAtInput('');
-            setIsUpdatingCodexLimits(false);
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-[520px]">
-          <DialogHeader>
-            <DialogTitle>设置限额</DialogTitle>
-            <DialogDescription className="break-all">
-              {limitsEditingCodexAccount
-                ? `账号ID: ${limitsEditingCodexAccount.account_id}`
-                : '请选择要设置限额的账号'}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4 py-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="codex-limit-5h-used">5小时已用%</Label>
-                <Input
-                  id="codex-limit-5h-used"
-                  type="number"
-                  min={0}
-                  max={100}
-                  placeholder="例如 10"
-                  value={codexLimit5hUsedInput}
-                  onChange={(e) => setCodexLimit5hUsedInput(e.target.value)}
-                  disabled={isUpdatingCodexLimits}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="codex-limit-5h-reset">5小时重置时间</Label>
-                <Input
-                  id="codex-limit-5h-reset"
-                  type="datetime-local"
-                  value={codexLimit5hResetAtInput}
-                  onChange={(e) => setCodexLimit5hResetAtInput(e.target.value)}
-                  disabled={isUpdatingCodexLimits}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="codex-limit-week-used">周限额已用%</Label>
-                <Input
-                  id="codex-limit-week-used"
-                  type="number"
-                  min={0}
-                  max={100}
-                  placeholder="例如 10"
-                  value={codexLimitWeekUsedInput}
-                  onChange={(e) => setCodexLimitWeekUsedInput(e.target.value)}
-                  disabled={isUpdatingCodexLimits}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="codex-limit-week-reset">周限额重置时间</Label>
-                <Input
-                  id="codex-limit-week-reset"
-                  type="datetime-local"
-                  value={codexLimitWeekResetAtInput}
-                  onChange={(e) => setCodexLimitWeekResetAtInput(e.target.value)}
-                  disabled={isUpdatingCodexLimits}
-                />
-              </div>
-            </div>
-
-            <p className="text-xs text-muted-foreground">
-              冻结规则：周限额打满优先（冻结到周重置时间）；否则 5小时打满（冻结到 5小时重置时间）。
-            </p>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setIsCodexLimitsDialogOpen(false)}
-              disabled={isUpdatingCodexLimits}
-            >
-              取消
-            </Button>
-            <Button
-              onClick={handleSubmitCodexLimits}
-              disabled={isUpdatingCodexLimits || !limitsEditingCodexAccount}
-            >
-              {isUpdatingCodexLimits ? (
                 <>
                   <MorphingSquare className="size-4 mr-2" />
                   保存中...

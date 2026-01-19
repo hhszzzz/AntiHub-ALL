@@ -41,7 +41,6 @@ def get_codex_service(
 
 
 def _serialize_account(account) -> dict:
-    # 前端使用 account_id 作为主键字段名（不是 id）
     return CodexAccountResponse.model_validate(account).model_dump(by_alias=False)
 
 
@@ -282,6 +281,25 @@ async def update_codex_account_limits(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="更新限额失败",
+        )
+
+
+@router.post("/accounts/{account_id}/refresh", summary="从官方刷新 Codex 账号额度/限额（落库）")
+async def refresh_codex_account(
+    account_id: int,
+    current_user: User = Depends(get_current_user),
+    service: CodexService = Depends(get_codex_service),
+):
+    try:
+        result = await service.refresh_account_official(current_user.id, account_id)
+        result["data"] = _serialize_account(result["data"])
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="刷新账号信息失败",
         )
 
 

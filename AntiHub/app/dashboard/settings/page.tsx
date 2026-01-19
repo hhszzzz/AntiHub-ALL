@@ -45,7 +45,7 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [deletingKeyId, setDeletingKeyId] = useState<number | null>(null);
-  const [selectedConfigType, setSelectedConfigType] = useState<'antigravity' | 'kiro' | 'qwen'>('antigravity');
+  const [selectedConfigType, setSelectedConfigType] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex'>('antigravity');
   const [keyName, setKeyName] = useState('');
   const [currentUser, setCurrentUser] = useState<UserResponse | null>(null);
 
@@ -385,6 +385,8 @@ export default function SettingsPage() {
                               <Badge>Kiro</Badge>
                             ) : key.config_type === 'qwen' ? (
                               <Badge variant="outline">Qwen</Badge>
+                            ) : key.config_type === 'codex' ? (
+                              <Badge variant="outline">Codex</Badge>
                             ) : (
                               <Badge variant="secondary">Antigravity</Badge>
                             )}
@@ -681,6 +683,33 @@ export default function SettingsPage() {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     使用Qwen账号配额
+                  </p>
+                </div>
+              </label>
+
+              {/* Codex */}
+              <label
+                className={cn(
+                  "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                  selectedConfigType === 'codex'
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
+                )}
+              >
+                <input
+                  type="radio"
+                  name="config_type"
+                  value="codex"
+                  checked={selectedConfigType === 'codex'}
+                  onChange={() => setSelectedConfigType('codex')}
+                  className="w-4 h-4 mt-1"
+                />
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold">Codex</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    使用 Codex 账号池（fill-first）
                   </p>
                 </div>
               </label>

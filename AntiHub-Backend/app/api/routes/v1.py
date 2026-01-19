@@ -1,7 +1,7 @@
 """
 OpenAI兼容的API端点
 支持API key或JWT token认证
-根据API key的config_type自动选择Antigravity / Kiro / Qwen配置
+根据API key的config_type自动选择Antigravity / Kiro / Qwen / Codex配置
 用户通过我们的key/token调用，我们再用plug-in key调用plug-in-api
 """
 from typing import List, Dict, Any, Optional
@@ -16,6 +16,7 @@ from app.api.deps import get_plugin_api_service, get_db_session, get_redis
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService, UpstreamAPIError
+from app.services.codex_service import CodexService
 from app.services.anthropic_adapter import AnthropicAdapter
 from app.services.usage_log_service import UsageLogService, SSEUsageTracker, extract_openai_usage
 from app.schemas.plugin_api import ChatCompletionRequest
@@ -37,24 +38,32 @@ def get_kiro_service(
     return KiroService(db, redis)
 
 
+def get_codex_service(
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
+) -> CodexService:
+    return CodexService(db, redis)
+
+
 @router.get(
     "/models",
     summary="获取模型列表",
-    description="获取可用的AI模型列表（OpenAI兼容）。根据API key的config_type自动选择Antigravity / Kiro / Qwen配置"
+    description="获取可用的AI模型列表（OpenAI兼容）。根据API key的config_type自动选择Antigravity / Kiro / Qwen / Codex配置"
 )
 async def list_models(
     request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
-    kiro_service: KiroService = Depends(get_kiro_service)
+    kiro_service: KiroService = Depends(get_kiro_service),
+    codex_service: CodexService = Depends(get_codex_service),
 ):
     """
     获取模型列表
     支持API key或JWT token认证
     
     **配置选择:**
-    - 使用API key认证时，根据API key创建时选择的config_type自动选择配置（antigravity/kiro/qwen）
-    - 使用JWT token认证时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置（antigravity/kiro/qwen）
+    - 使用API key认证时，根据API key创建时选择的config_type自动选择配置（antigravity/kiro/qwen/codex）
+    - 使用JWT token认证时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置（antigravity/kiro/qwen/codex）
     - Kiro配置需要beta权限（qwen不需要）
     """
     try:
@@ -65,12 +74,15 @@ async def list_models(
         # 如果是JWT token认证（无_config_type），检查请求头
         if config_type is None:
             api_type = request.headers.get("X-Api-Type")
-            if api_type in ["kiro", "antigravity", "qwen"]:
+            if api_type in ["kiro", "antigravity", "qwen", "codex"]:
                 config_type = api_type
         
         use_kiro = config_type == "kiro"
+        use_codex = config_type == "codex"
         
-        if use_kiro:
+        if use_codex:
+            result = await codex_service.openai_list_models()
+        elif use_kiro:
             # 检查 beta 权限（管理员放行）
             if current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:
                 raise HTTPException(
@@ -129,6 +141,7 @@ async def responses(
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
+    codex_service: CodexService = Depends(get_codex_service),
 ):
     start_time = time.monotonic()
     endpoint = raw_request.url.path
@@ -149,13 +162,108 @@ async def responses(
     config_type = getattr(current_user, "_config_type", None)
     if config_type is None:
         api_type = raw_request.headers.get("X-Api-Type")
-        if api_type in ["kiro", "antigravity", "qwen"]:
+        if api_type in ["kiro", "antigravity", "qwen", "codex"]:
             config_type = api_type
 
     effective_config_type = config_type or "antigravity"
     use_kiro = effective_config_type == "kiro"
+    use_codex = effective_config_type == "codex"
 
     try:
+        if use_codex:
+            stream = bool(request_json.get("stream"))
+
+            if stream:
+                tracker = SSEUsageTracker()
+
+                async def generate():
+                    had_exception = False
+                    client = None
+                    resp = None
+                    try:
+                        client, resp, _account = await codex_service.open_codex_responses_stream(
+                            user_id=current_user.id,
+                            request_data=request_json,
+                            user_agent=raw_request.headers.get("User-Agent"),
+                        )
+                        async for chunk in resp.aiter_bytes():
+                            if isinstance(chunk, (bytes, bytearray)):
+                                b = bytes(chunk)
+                            else:
+                                b = str(chunk).encode("utf-8", errors="replace")
+                            tracker.feed(b)
+                            yield b
+                    except Exception as e:
+                        had_exception = True
+                        tracker.success = False
+                        tracker.status_code = tracker.status_code or 500
+                        tracker.error_message = str(e)
+                        raise
+                    finally:
+                        tracker.finalize()
+                        duration_ms = int((time.monotonic() - start_time) * 1000)
+                        await UsageLogService.record(
+                            user_id=current_user.id,
+                            api_key_id=api_key_id,
+                            endpoint=endpoint,
+                            method=method,
+                            model_name=model_name,
+                            config_type="codex",
+                            stream=True,
+                            input_tokens=tracker.input_tokens,
+                            output_tokens=tracker.output_tokens,
+                            total_tokens=tracker.total_tokens,
+                            success=(False if had_exception else tracker.success),
+                            status_code=tracker.status_code or (500 if had_exception else 200),
+                            error_message=tracker.error_message,
+                            duration_ms=duration_ms,
+                        )
+                        if resp is not None:
+                            try:
+                                await resp.aclose()
+                            except Exception:
+                                pass
+                        if client is not None:
+                            try:
+                                await client.aclose()
+                            except Exception:
+                                pass
+
+                return StreamingResponse(
+                    generate(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+
+            resp_obj = await codex_service.execute_codex_responses(
+                user_id=current_user.id,
+                request_data=request_json,
+                user_agent=raw_request.headers.get("User-Agent"),
+            )
+
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            in_tok, out_tok, total_tok = extract_openai_usage(resp_obj)
+            await UsageLogService.record(
+                user_id=current_user.id,
+                api_key_id=api_key_id,
+                endpoint=endpoint,
+                method=method,
+                model_name=model_name,
+                config_type="codex",
+                stream=False,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                total_tokens=total_tok,
+                success=True,
+                status_code=200,
+                duration_ms=duration_ms,
+            )
+            return JSONResponse(content=resp_obj)
+
         if use_kiro and current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -423,13 +531,19 @@ async def chat_completions(
     config_type = getattr(current_user, "_config_type", None)
     if config_type is None:
         api_type = raw_request.headers.get("X-Api-Type")
-        if api_type in ["kiro", "antigravity", "qwen"]:
+        if api_type in ["kiro", "antigravity", "qwen", "codex"]:
             config_type = api_type
 
     effective_config_type = config_type or "antigravity"
     use_kiro = effective_config_type == "kiro"
 
     try:
+        if use_codex:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Codex 账号请使用 /v1/responses（Responses API）",
+            )
+
         if use_kiro and current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

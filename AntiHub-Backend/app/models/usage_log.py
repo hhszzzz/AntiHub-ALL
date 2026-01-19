@@ -22,7 +22,7 @@ class UsageLog(Base):
     endpoint = Column(String(255), nullable=False)  # 调用的端点
     method = Column(String(10), nullable=False)  # HTTP方法
     model_name = Column(String(100), nullable=True)  # 使用的模型
-    config_type = Column(String(20), nullable=True, index=True)  # antigravity / kiro / qwen
+    config_type = Column(String(20), nullable=True, index=True)  # antigravity / kiro / qwen / codex
     stream = Column(Boolean, default=False, nullable=False)  # 是否为流式请求
     
     # 配额消耗

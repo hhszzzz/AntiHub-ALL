@@ -55,6 +55,12 @@ def extract_openai_usage(payload: Dict[str, Any]) -> Tuple[int, int, int]:
     if isinstance(raw_usage, dict):
         usage = raw_usage
 
+    # OpenAI Responses streaming: data 里是 event wrapper（含 response 字段）
+    if not usage:
+        response_obj = payload.get("response")
+        if isinstance(response_obj, dict) and isinstance(response_obj.get("usage"), dict):
+            usage = response_obj["usage"]
+
     if not usage:
         x_groq = payload.get("x_groq")
         if isinstance(x_groq, dict) and isinstance(x_groq.get("usage"), dict):
@@ -97,10 +103,10 @@ class SSEUsageTracker:
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
             line = line.strip()
-            if not line or not line.startswith("data: "):
+            if not line or not line.startswith("data:"):
                 continue
 
-            data_str = line[6:].strip()
+            data_str = line[5:].strip()
             if data_str == "[DONE]":
                 continue
 
@@ -118,10 +124,17 @@ class SSEUsageTracker:
                     self.total_tokens = total_tok
                     self._seen_usage = True
 
-                # error
+                # error（兼容 Responses: response.error）
+                err = None
                 if "error" in payload:
-                    self.success = False
                     err = payload.get("error")
+                else:
+                    response_obj = payload.get("response")
+                    if isinstance(response_obj, dict) and response_obj.get("error") is not None:
+                        err = response_obj.get("error")
+
+                if err is not None:
+                    self.success = False
                     if isinstance(err, dict):
                         self.error_message = _truncate_message(
                             err.get("message") or err.get("detail") or str(err)
@@ -185,4 +198,3 @@ class UsageLogService:
                 await db.commit()
         except Exception as e:
             logger.warning(f"记录 usage_log 失败: {e}")
-
