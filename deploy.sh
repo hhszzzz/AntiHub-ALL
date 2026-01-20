@@ -60,32 +60,103 @@ read_with_default() {
     local value
 
     read -p "$prompt [$default]: " value
+    # 兼容某些终端/粘贴会带 CR（\r）的情况：避免后续写入 .env / 解析变量时出错
+    value=${value//$'\r'/}
     echo "${value:-$default}"
 }
 
-# 读取密码（不显示输入）
+# 读取密码（明文输入一次）
 read_password() {
     local prompt="$1"
     local password
-    local password_confirm
 
     while true; do
-        read -s -p "$prompt: " password
-        echo
-        read -s -p "确认密码: " password_confirm
-        echo
-
-        if [ "$password" = "$password_confirm" ]; then
-            if [ -z "$password" ]; then
-                log_error "密码不能为空"
-                continue
-            fi
-            echo "$password"
-            break
-        else
-            log_error "两次密码输入不一致，请重新输入"
+        # 按用户需求：明文输入一次，不再二次确认
+        read -p "$prompt: " password
+        password=${password//$'\r'/}
+        if [ -z "$password" ]; then
+            log_error "密码不能为空"
+            continue
         fi
+        echo "$password"
+        break
     done
+}
+
+# 写入 .env：不依赖 sed（避免特殊字符/终端粘贴导致 sed 解析报错）
+write_env_file() {
+    local env_file="$1"
+    local tmp_file="${env_file}.tmp"
+
+    local postgres_user
+    local postgres_db
+    postgres_user=$(grep "^POSTGRES_USER=" "$env_file" | cut -d'=' -f2- 2>/dev/null || true)
+    postgres_db=$(grep "^POSTGRES_DB=" "$env_file" | cut -d'=' -f2- 2>/dev/null || true)
+    postgres_user=${postgres_user//$'\r'/}
+    postgres_db=${postgres_db//$'\r'/}
+    postgres_user=${postgres_user:-antihub}
+    postgres_db=${postgres_db:-antihub}
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line//$'\r'/}
+        case "$line" in
+            WEB_PORT=*)
+                printf '%s\n' "WEB_PORT=$WEB_PORT"
+                ;;
+            BACKEND_PORT=*)
+                printf '%s\n' "BACKEND_PORT=$BACKEND_PORT"
+                ;;
+            \#\ POSTGRES_PORT=*|\#POSTGRES_PORT=*|POSTGRES_PORT=*)
+                printf '%s\n' "POSTGRES_PORT=$POSTGRES_PORT"
+                ;;
+            ADMIN_USERNAME=*)
+                printf '%s\n' "ADMIN_USERNAME=$ADMIN_USERNAME"
+                ;;
+            ADMIN_PASSWORD=*)
+                printf '%s\n' "ADMIN_PASSWORD=$ADMIN_PASSWORD"
+                ;;
+            JWT_SECRET_KEY=*)
+                printf '%s\n' "JWT_SECRET_KEY=$JWT_SECRET"
+                ;;
+            PLUGIN_ADMIN_API_KEY=*)
+                printf '%s\n' "PLUGIN_ADMIN_API_KEY=$ADMIN_API_KEY"
+                ;;
+            POSTGRES_PASSWORD=*)
+                printf '%s\n' "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
+                ;;
+            PLUGIN_DB_USER=*)
+                # 简化：plugin 直接复用 PostgreSQL 超管用户
+                printf '%s\n' "PLUGIN_DB_USER=$postgres_user"
+                ;;
+            PLUGIN_DB_PASSWORD=*)
+                # 简化：plugin 直接复用 PostgreSQL 超管密码
+                printf '%s\n' "PLUGIN_DB_PASSWORD=$POSTGRES_PASSWORD"
+                ;;
+            PLUGIN_API_ENCRYPTION_KEY=*)
+                printf '%s\n' "PLUGIN_API_ENCRYPTION_KEY=$ENCRYPTION_KEY"
+                ;;
+            DATABASE_URL=*)
+                printf '%s\n' "DATABASE_URL=postgresql+asyncpg://${postgres_user}:${POSTGRES_PASSWORD}@postgres:5432/${postgres_db}"
+                ;;
+            *)
+                printf '%s\n' "$line"
+                ;;
+        esac
+    done < "$env_file" > "$tmp_file"
+
+    mv "$tmp_file" "$env_file"
+}
+
+get_env_value() {
+    local file="$1"
+    local key="$2"
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+    local value
+    value=$(grep -m 1 "^${key}=" "$file" 2>/dev/null | cut -d'=' -f2- || true)
+    value=${value//$'\r'/}
+    printf '%s' "$value"
 }
 
 # 主函数
@@ -111,6 +182,17 @@ main() {
     fi
     log_info "使用命令: $DOCKER_COMPOSE"
 
+    # 组合 docker compose 文件：基础 compose + 数据库初始化 compose（可选）
+    DB_INIT_COMPOSE_FILE="docker/docker-compose.db-init.yml"
+    COMPOSE_FILES="-f docker-compose.yml"
+    if [ -f "$DB_INIT_COMPOSE_FILE" ]; then
+        COMPOSE_FILES="$COMPOSE_FILES -f $DB_INIT_COMPOSE_FILE"
+    fi
+
+    compose() {
+        $DOCKER_COMPOSE $COMPOSE_FILES "$@"
+    }
+
     # 检查 Docker 是否运行
     if ! docker info &> /dev/null; then
         log_error "Docker 未运行，请先启动 Docker 服务"
@@ -118,6 +200,7 @@ main() {
     fi
 
     # 2. 检查 .env 文件
+    ENV_BACKUP_FILE=""
     if [ -f .env ]; then
         log_warn ".env 文件已存在"
         read -p "是否覆盖现有配置？(y/N): " -n 1 -r
@@ -127,6 +210,9 @@ main() {
             ENV_EXISTS=true
         else
             ENV_EXISTS=false
+            ENV_BACKUP_FILE=".env.bak.$(date +\"%Y%m%d_%H%M%S\")"
+            cp .env "$ENV_BACKUP_FILE"
+            log_info "已备份原 .env 到 ${ENV_BACKUP_FILE}"
         fi
     else
         ENV_EXISTS=false
@@ -171,44 +257,42 @@ main() {
 
         # 3.3 生成密钥
         log_info "生成安全密钥..."
-        JWT_SECRET=$(generate_random_key)
-        ADMIN_API_KEY="sk-admin-$(generate_random_key | cut -c1-32)"
-        POSTGRES_PASSWORD=$(generate_random_key | cut -c1-24)
-        PLUGIN_DB_PASSWORD=$(generate_random_key | cut -c1-24)
+        OLD_JWT_SECRET=$(get_env_value "$ENV_BACKUP_FILE" "JWT_SECRET_KEY")
+        OLD_ADMIN_API_KEY=$(get_env_value "$ENV_BACKUP_FILE" "PLUGIN_ADMIN_API_KEY")
+        OLD_POSTGRES_PASSWORD=$(get_env_value "$ENV_BACKUP_FILE" "POSTGRES_PASSWORD")
+        OLD_ENCRYPTION_KEY=$(get_env_value "$ENV_BACKUP_FILE" "PLUGIN_API_ENCRYPTION_KEY")
+
+        if [ -n "$OLD_JWT_SECRET" ] && [ "$OLD_JWT_SECRET" != "please-change-me" ]; then
+            JWT_SECRET="$OLD_JWT_SECRET"
+        else
+            JWT_SECRET=$(generate_random_key)
+        fi
+
+        if [ -n "$OLD_ADMIN_API_KEY" ] && [ "$OLD_ADMIN_API_KEY" != "sk-admin-please-change-me" ]; then
+            ADMIN_API_KEY="$OLD_ADMIN_API_KEY"
+        else
+            ADMIN_API_KEY="sk-admin-$(generate_random_key | cut -c1-32)"
+        fi
+
+        if [ -n "$OLD_POSTGRES_PASSWORD" ] && [ "$OLD_POSTGRES_PASSWORD" != "please-change-me" ]; then
+            POSTGRES_PASSWORD="$OLD_POSTGRES_PASSWORD"
+        else
+            POSTGRES_PASSWORD=$(generate_random_key | cut -c1-24)
+        fi
+
+        # 简化：plugin 直接复用 PostgreSQL 超管密码
+        PLUGIN_DB_PASSWORD="$POSTGRES_PASSWORD"
 
         log_info "生成 Fernet 加密密钥..."
-        ENCRYPTION_KEY=$(generate_fernet_key)
+        if [ -n "$OLD_ENCRYPTION_KEY" ] && [ "$OLD_ENCRYPTION_KEY" != "please-generate-a-valid-fernet-key" ]; then
+            ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY"
+        else
+            ENCRYPTION_KEY=$(generate_fernet_key)
+        fi
 
         # 3.4 替换 .env 中的占位符（兼容 Linux 和 macOS）
         log_info "写入配置文件..."
-
-        if sed --version 2>&1 | grep -q GNU; then
-            # GNU sed (Linux)
-            sed -i "s|^WEB_PORT=.*|WEB_PORT=${WEB_PORT}|g" .env
-            sed -i "s|^BACKEND_PORT=.*|BACKEND_PORT=${BACKEND_PORT}|g" .env
-            sed -i "s|^# POSTGRES_PORT=.*|POSTGRES_PORT=${POSTGRES_PORT}|g" .env
-            sed -i "s|^ADMIN_USERNAME=.*|ADMIN_USERNAME=${ADMIN_USERNAME}|g" .env
-            sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=${ADMIN_PASSWORD}|g" .env
-            sed -i "s|JWT_SECRET_KEY=please-change-me|JWT_SECRET_KEY=${JWT_SECRET}|g" .env
-            sed -i "s|PLUGIN_ADMIN_API_KEY=sk-admin-please-change-me|PLUGIN_ADMIN_API_KEY=${ADMIN_API_KEY}|g" .env
-            sed -i "s|POSTGRES_PASSWORD=please-change-me|POSTGRES_PASSWORD=${POSTGRES_PASSWORD}|g" .env
-            sed -i "s|PLUGIN_DB_PASSWORD=please-change-me|PLUGIN_DB_PASSWORD=${PLUGIN_DB_PASSWORD}|g" .env
-            sed -i "s|PLUGIN_API_ENCRYPTION_KEY=please-generate-a-valid-fernet-key|PLUGIN_API_ENCRYPTION_KEY=${ENCRYPTION_KEY}|g" .env
-            sed -i "s|postgresql+asyncpg://antihub:please-change-me@postgres:5432/antihub|postgresql+asyncpg://antihub:${POSTGRES_PASSWORD}@postgres:5432/antihub|g" .env
-        else
-            # BSD sed (macOS)
-            sed -i '' "s|^WEB_PORT=.*|WEB_PORT=${WEB_PORT}|g" .env
-            sed -i '' "s|^BACKEND_PORT=.*|BACKEND_PORT=${BACKEND_PORT}|g" .env
-            sed -i '' "s|^# POSTGRES_PORT=.*|POSTGRES_PORT=${POSTGRES_PORT}|g" .env
-            sed -i '' "s|^ADMIN_USERNAME=.*|ADMIN_USERNAME=${ADMIN_USERNAME}|g" .env
-            sed -i '' "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=${ADMIN_PASSWORD}|g" .env
-            sed -i '' "s|JWT_SECRET_KEY=please-change-me|JWT_SECRET_KEY=${JWT_SECRET}|g" .env
-            sed -i '' "s|PLUGIN_ADMIN_API_KEY=sk-admin-please-change-me|PLUGIN_ADMIN_API_KEY=${ADMIN_API_KEY}|g" .env
-            sed -i '' "s|POSTGRES_PASSWORD=please-change-me|POSTGRES_PASSWORD=${POSTGRES_PASSWORD}|g" .env
-            sed -i '' "s|PLUGIN_DB_PASSWORD=please-change-me|PLUGIN_DB_PASSWORD=${PLUGIN_DB_PASSWORD}|g" .env
-            sed -i '' "s|PLUGIN_API_ENCRYPTION_KEY=please-generate-a-valid-fernet-key|PLUGIN_API_ENCRYPTION_KEY=${ENCRYPTION_KEY}|g" .env
-            sed -i '' "s|postgresql+asyncpg://antihub:please-change-me@postgres:5432/antihub|postgresql+asyncpg://antihub:${POSTGRES_PASSWORD}@postgres:5432/antihub|g" .env
-        fi
+        write_env_file ".env"
 
         log_info "环境变量配置已生成"
         echo ""
@@ -216,25 +300,20 @@ main() {
 
     # 4. 拉取镜像
     log_info "拉取 Docker 镜像..."
-    $DOCKER_COMPOSE pull
+    compose pull
 
     # 5. 停止旧容器（如果存在）
     log_info "停止旧容器..."
-    $DOCKER_COMPOSE down 2>/dev/null || true
+    compose down 2>/dev/null || true
 
-    # 6. 启动服务
-    log_info "启动服务..."
-    $DOCKER_COMPOSE up -d
+    # 6. 先启动基础依赖（数据库 / 缓存），并完成数据库初始化，再启动主容器
+    log_info "启动数据库与缓存（postgres/redis）..."
+    compose up -d postgres redis
 
-    # 7. 等待服务启动
-    log_info "等待服务启动..."
-    sleep 5
-
-    # 检查 PostgreSQL 健康状态
     log_info "检查 PostgreSQL 状态..."
     POSTGRES_USER_CHECK=$(grep "^POSTGRES_USER=" .env | cut -d'=' -f2 || echo "antihub")
     for i in {1..30}; do
-        if $DOCKER_COMPOSE exec -T postgres pg_isready -U "$POSTGRES_USER_CHECK" &> /dev/null; then
+        if compose exec -T postgres pg_isready -U "$POSTGRES_USER_CHECK" &> /dev/null; then
             log_info "PostgreSQL 已就绪"
             break
         fi
@@ -245,65 +324,68 @@ main() {
         sleep 2
     done
 
-    # 确保 Plugin 数据库/用户已正确初始化（避免只改端口/重写 .env 后出现密码不一致）
-    log_info "同步 PostgreSQL 中的 plugin 数据库/用户..."
+    # 初始化/同步两个数据库（antihub / plugin）
+    log_info "初始化数据库（antihub / plugin）..."
     POSTGRES_USER_ENV=$(grep "^POSTGRES_USER=" .env | cut -d'=' -f2 || echo "antihub")
     POSTGRES_PASSWORD_ENV=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- || echo "please-change-me")
+    POSTGRES_DB_ENV=$(grep "^POSTGRES_DB=" .env | cut -d'=' -f2 || echo "antihub")
     PLUGIN_DB_NAME_ENV=$(grep "^PLUGIN_DB_NAME=" .env | cut -d'=' -f2 || echo "antigravity")
-    PLUGIN_DB_USER_ENV=$(grep "^PLUGIN_DB_USER=" .env | cut -d'=' -f2 || echo "antigravity")
-    PLUGIN_DB_PASSWORD_ENV=$(grep "^PLUGIN_DB_PASSWORD=" .env | cut -d'=' -f2- || echo "please-change-me")
+    PLUGIN_DB_USER_ENV=$(grep "^PLUGIN_DB_USER=" .env | cut -d'=' -f2 || echo "$POSTGRES_USER_ENV")
+    PLUGIN_DB_PASSWORD_ENV=$(grep "^PLUGIN_DB_PASSWORD=" .env | cut -d'=' -f2- || echo "$POSTGRES_PASSWORD_ENV")
 
-    $DOCKER_COMPOSE exec -T postgres psql -v ON_ERROR_STOP=1 \
+    compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
         -U "$POSTGRES_USER_ENV" -d postgres \
         -v su_user="$POSTGRES_USER_ENV" -v su_pass="$POSTGRES_PASSWORD_ENV" \
+        -v main_db="$POSTGRES_DB_ENV" \
         -v plugin_db="$PLUGIN_DB_NAME_ENV" -v plugin_user="$PLUGIN_DB_USER_ENV" -v plugin_pass="$PLUGIN_DB_PASSWORD_ENV" <<-'EOSQL'
-DO $$
-BEGIN
-    -- 让数据库里的密码与 .env 保持一致（覆盖式配置也能正常连上旧数据卷）
-    EXECUTE format('ALTER USER %I WITH PASSWORD %L', :'su_user', :'su_pass');
+SELECT format('ALTER USER %I WITH PASSWORD %L', :'su_user', :'su_pass') \gexec
 
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'plugin_user') THEN
-        EXECUTE format('CREATE USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass');
-    ELSE
-        EXECUTE format('ALTER USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass');
-    END IF;
+SELECT format('CREATE DATABASE %I OWNER %I', :'main_db', :'su_user')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'main_db') \gexec
 
-    IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'plugin_db') THEN
-        EXECUTE format('CREATE DATABASE %I OWNER %I', :'plugin_db', :'plugin_user');
-    ELSE
-        EXECUTE format('ALTER DATABASE %I OWNER TO %I', :'plugin_db', :'plugin_user');
-    END IF;
+SELECT format('ALTER DATABASE %I OWNER TO %I', :'main_db', :'su_user')
+WHERE EXISTS (SELECT 1 FROM pg_database WHERE datname = :'main_db') \gexec
 
-    EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', :'plugin_db', :'plugin_user');
-END $$;
+SELECT format('CREATE USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass')
+WHERE :'plugin_user' <> :'su_user'
+  AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'plugin_user') \gexec
+
+SELECT format('ALTER USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass')
+WHERE :'plugin_user' <> :'su_user'
+  AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'plugin_user') \gexec
+
+SELECT format('CREATE DATABASE %I OWNER %I', :'plugin_db', :'plugin_user')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'plugin_db') \gexec
+
+SELECT format('ALTER DATABASE %I OWNER TO %I', :'plugin_db', :'plugin_user')
+WHERE EXISTS (SELECT 1 FROM pg_database WHERE datname = :'plugin_db') \gexec
+
+SELECT format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', :'plugin_db', :'plugin_user') \gexec
 EOSQL
 
-    $DOCKER_COMPOSE exec -T postgres psql -v ON_ERROR_STOP=1 \
+    compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
         -U "$POSTGRES_USER_ENV" -d "$PLUGIN_DB_NAME_ENV" \
         -v plugin_user="$PLUGIN_DB_USER_ENV" <<-'EOSQL'
-DO $$
-BEGIN
-    EXECUTE format('GRANT ALL ON SCHEMA public TO %I', :'plugin_user');
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I', :'plugin_user');
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I', :'plugin_user');
-END $$;
+SELECT format('GRANT ALL ON SCHEMA public TO %I', :'plugin_user') \gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I', :'plugin_user') \gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I', :'plugin_user') \gexec
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 EOSQL
 
-    # 如果 plugin/backend 因为数据库密码/库不存在启动失败，这里统一重启一次
-    $DOCKER_COMPOSE restart plugin backend &> /dev/null || true
+    log_info "启动主服务（plugin/backend/web）..."
+    compose up -d plugin backend web
 
     # 检查服务状态
     log_info "检查服务状态..."
     sleep 3
 
-    FAILED_SERVICES=$($DOCKER_COMPOSE ps --services --filter "status=exited")
+    FAILED_SERVICES=$(compose ps --services --filter "status=exited")
     if [ -n "$FAILED_SERVICES" ]; then
         log_error "以下服务启动失败："
         echo "$FAILED_SERVICES"
         log_info "查看日志："
-        $DOCKER_COMPOSE logs --tail=50
+        compose logs --tail=50
         exit 1
     fi
 
@@ -319,7 +401,7 @@ EOSQL
     BACKEND_PORT=$(grep "^BACKEND_PORT=" .env | cut -d'=' -f2 || echo "8000")
     POSTGRES_PORT=$(grep "^POSTGRES_PORT=" .env | cut -d'=' -f2 || echo "5432")
     ADMIN_USERNAME=$(grep "^ADMIN_USERNAME=" .env | cut -d'=' -f2 || echo "admin")
-    ADMIN_PASSWORD=$(grep "^ADMIN_PASSWORD=" .env | cut -d'=' -f2)
+    ADMIN_PASSWORD=$(grep "^ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
 
     # 获取服务器 IP
     SERVER_IP=$(hostname -I | awk '{print $1}' || echo "YOUR_SERVER_IP")
@@ -338,10 +420,10 @@ EOSQL
     echo "  数据库: antihub, antigravity"
     echo ""
     log_info "常用命令："
-    echo "  查看日志: $DOCKER_COMPOSE logs -f"
-    echo "  停止服务: $DOCKER_COMPOSE down"
-    echo "  重启服务: $DOCKER_COMPOSE restart"
-    echo "  查看状态: $DOCKER_COMPOSE ps"
+    echo "  查看日志: $DOCKER_COMPOSE $COMPOSE_FILES logs -f"
+    echo "  停止服务: $DOCKER_COMPOSE $COMPOSE_FILES down"
+    echo "  重启服务: $DOCKER_COMPOSE $COMPOSE_FILES restart"
+    echo "  查看状态: $DOCKER_COMPOSE $COMPOSE_FILES ps"
     echo ""
     log_warn "重要提示："
     echo "  1. 请妥善保管 .env 文件中的密钥"

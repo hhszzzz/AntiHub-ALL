@@ -29,7 +29,13 @@
 
 ## 一键部署
 
-Linux运行`deploy.sh`即可
+Linux运行`deploy.sh`即可（会先启动 `postgres/redis`，同步/初始化两个数据库，再启动主服务；默认 plugin 复用 PostgreSQL 超管账号）
+
+如需手动同步（复用旧数据卷但重写了 `.env` 密码时很有用）：
+
+```bash
+docker compose -f docker-compose.yml -f docker/docker-compose.db-init.yml run --rm db-init
+```
 
 ## 快速开始
 
