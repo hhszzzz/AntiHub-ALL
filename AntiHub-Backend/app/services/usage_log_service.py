@@ -14,12 +14,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
+from sqlalchemy import delete, select
+
 from app.db.session import get_session_maker
 from app.models.usage_log import UsageLog
 
 logger = logging.getLogger(__name__)
 
 MAX_ERROR_MESSAGE_LENGTH = 2000
+MAX_LOGS_PER_CHANNEL = 200
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -38,6 +41,36 @@ def _truncate_message(message: Optional[str]) -> Optional[str]:
     if len(msg) <= MAX_ERROR_MESSAGE_LENGTH:
         return msg
     return msg[:MAX_ERROR_MESSAGE_LENGTH] + "…"
+
+
+def _config_type_filter(config_type: Optional[str]):
+    if config_type is None:
+        return UsageLog.config_type.is_(None)
+    return UsageLog.config_type == config_type
+
+
+async def _trim_usage_logs(
+    db,
+    *,
+    user_id: int,
+    config_type: Optional[str],
+    keep: int = MAX_LOGS_PER_CHANNEL,
+) -> None:
+    if keep <= 0:
+        stmt = delete(UsageLog).where(UsageLog.user_id == user_id).where(
+            _config_type_filter(config_type)
+        )
+        await db.execute(stmt)
+        return
+
+    ids_to_delete = (
+        select(UsageLog.id)
+        .where(UsageLog.user_id == user_id)
+        .where(_config_type_filter(config_type))
+        .order_by(UsageLog.created_at.desc(), UsageLog.id.desc())
+        .offset(keep)
+    )
+    await db.execute(delete(UsageLog).where(UsageLog.id.in_(ids_to_delete)))
 
 
 def extract_openai_usage(payload: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -196,5 +229,12 @@ class UsageLogService:
                 )
                 db.add(log)
                 await db.commit()
+
+                try:
+                    await _trim_usage_logs(db, user_id=user_id, config_type=config_type)
+                    await db.commit()
+                except Exception as e:
+                    await db.rollback()
+                    logger.warning(f"清理 usage_log 失败: {e}")
         except Exception as e:
             logger.warning(f"记录 usage_log 失败: {e}")
