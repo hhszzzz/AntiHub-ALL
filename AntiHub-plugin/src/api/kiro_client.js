@@ -96,6 +96,10 @@ class KiroClient {
 
     // 转换请求格式
     const cwRequest = kiroService.convertToCodeWhispererRequest(messages, model, options);
+    // AWS IMA / IdC 账号通常需要 profileArn（Social 账号也可能返回该字段）
+    if (typeof account.profile_arn === 'string' && account.profile_arn.trim()) {
+      cwRequest.profileArn = account.profile_arn.trim();
+    }
     const requestBody = JSON.stringify(cwRequest);
 
     return new Promise((resolve, reject) => {

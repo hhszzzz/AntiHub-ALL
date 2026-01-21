@@ -630,7 +630,6 @@ class KiroService {
       history.push({
         assistantResponseMessage: {
           content: 'OK',
-          toolUses: null
         }
       });
     }
@@ -679,7 +678,7 @@ class KiroService {
         history.push({
           assistantResponseMessage: {
             content: textContent || '',
-            toolUses: toolUses.length > 0 ? toolUses : null
+            ...(toolUses.length > 0 ? { toolUses } : {})
           }
         });
       }
@@ -713,7 +712,6 @@ class KiroService {
       history.push({
         assistantResponseMessage: {
           content: 'OK',
-          toolUses: null
         }
       });
     }
@@ -1030,13 +1028,9 @@ class KiroService {
   /**
    * 确定聊天触发类型
    */
-  determineChatTriggerType(options) {
-    if (options.tools?.length > 0) {
-      const tc = options.tool_choice;
-      if (tc === 'any' || (tc && tc.type === 'any') || (tc && tc.type === 'tool')) {
-        return 'AUTO';
-      }
-    }
+  determineChatTriggerType(_options) {
+    // 经验结论：chatTriggerType= AUTO 在 Kiro / CodeWhisperer 上游会触发 400
+    // 统一使用 MANUAL，避免 "Improperly formed request."
     return 'MANUAL';
   }
 
