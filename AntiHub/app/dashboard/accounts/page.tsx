@@ -96,6 +96,7 @@ export default function AccountsPage() {
   const [kiroBalances, setKiroBalances] = useState<Record<string, number>>({});
   const [qwenAccounts, setQwenAccounts] = useState<QwenAccount[]>([]);
   const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
+  const [codexRefreshErrorById, setCodexRefreshErrorById] = useState<Record<number, string>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshingCookieId, setRefreshingCookieId] = useState<string | null>(null);
@@ -601,6 +602,12 @@ export default function AccountsPage() {
         try {
           await deleteCodexAccount(accountId);
           setCodexAccounts(codexAccounts.filter((a) => a.account_id !== accountId));
+          setCodexRefreshErrorById((prev) => {
+            if (!(accountId in prev)) return prev;
+            const next = { ...prev };
+            delete next[accountId];
+            return next;
+          });
           toasterRef.current?.show({
             title: '删除成功',
             message: 'Codex账号已删除',
@@ -897,6 +904,12 @@ export default function AccountsPage() {
       setCodexAccounts((prev) => prev.map((a) => (a.account_id === accountId ? { ...a, ...updated } : a)));
       setDetailCodexAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));
       setCodexWhamAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));
+      setCodexRefreshErrorById((prev) => {
+        if (!(accountId in prev)) return prev;
+        const next = { ...prev };
+        delete next[accountId];
+        return next;
+      });
       toasterRef.current?.show({
         title: '刷新成功',
         message: '已从官方刷新额度/限额',
@@ -904,9 +917,11 @@ export default function AccountsPage() {
         position: 'top-right',
       });
     } catch (err) {
+      const message = err instanceof Error ? err.message : '刷新账号信息失败';
+      setCodexRefreshErrorById((prev) => ({ ...prev, [accountId]: message }));
       toasterRef.current?.show({
         title: '刷新失败',
-        message: err instanceof Error ? err.message : '刷新账号信息失败',
+        message,
         variant: 'error',
         position: 'top-right',
       });
@@ -942,9 +957,17 @@ export default function AccountsPage() {
           setCodexAccounts((prev) => prev.map((a) => (a.account_id === accountId ? { ...a, ...updated } : a)));
           setDetailCodexAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));
           setCodexWhamAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));
+          setCodexRefreshErrorById((prev) => {
+            if (!(accountId in prev)) return prev;
+            const next = { ...prev };
+            delete next[accountId];
+            return next;
+          });
         } catch (err) {
           failCount += 1;
           console.warn('刷新 Codex 账号失败:', accountId, err);
+          const message = err instanceof Error ? err.message : '刷新账号信息失败';
+          setCodexRefreshErrorById((prev) => ({ ...prev, [accountId]: message }));
         }
       }
     } finally {
@@ -1653,13 +1676,13 @@ export default function AccountsPage() {
                         <TableHead className="min-w-[160px]">账号名称</TableHead>
                         <TableHead className="min-w-[220px]">邮箱</TableHead>
                         <TableHead className="min-w-[120px]">订阅</TableHead>
-                        <TableHead className="min-w-[120px]">剩余额度</TableHead>
                         <TableHead className="min-w-[80px]">状态</TableHead>
                         <TableHead className="min-w-[120px]">5小时/周剩余</TableHead>
                         <TableHead className="min-w-[180px]">解冻时间</TableHead>
                         <TableHead className="min-w-[180px]">Token过期</TableHead>
                         <TableHead className="min-w-[180px]">添加时间</TableHead>
                         <TableHead className="text-right min-w-[80px]">操作</TableHead>
+                        <TableHead className="min-w-[260px]">信息</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1678,11 +1701,6 @@ export default function AccountsPage() {
                             <Badge variant="secondary">
                               {account.chatgpt_plan_type || '-'}
                             </Badge>
-                          </TableCell>
-                          <TableCell className="font-mono text-sm whitespace-nowrap">
-                            {account.quota_remaining === null || account.quota_remaining === undefined
-                              ? '-'
-                              : `${Number(account.quota_remaining).toFixed(2)}${account.quota_currency ? ` ${account.quota_currency}` : ''}`}
                           </TableCell>
                           <TableCell>
                             <Badge
@@ -1775,6 +1793,27 @@ export default function AccountsPage() {
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {(() => {
+                              const accountId = account.account_id;
+                              const error = codexRefreshErrorById[accountId];
+                              const isRefreshing = refreshingCodexAccountId === accountId;
+                              const quotaText =
+                                account.quota_remaining === null || account.quota_remaining === undefined
+                                  ? '-'
+                                  : `${Number(account.quota_remaining).toFixed(2)}${account.quota_currency ? ` ${account.quota_currency}` : ''}`;
+                              const infoText = isRefreshing ? '刷新中...' : error || quotaText;
+
+                              return (
+                                <div
+                                  className={`max-w-[260px] truncate ${error ? 'text-red-600' : 'font-mono text-muted-foreground'}`}
+                                  title={infoText}
+                                >
+                                  {infoText}
+                                </div>
+                              );
+                            })()}
                           </TableCell>
                         </TableRow>
                       ))}
