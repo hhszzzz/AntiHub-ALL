@@ -19,7 +19,8 @@ from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService
 from app.services.anthropic_adapter import AnthropicAdapter
-from app.utils.kiro_converters import apply_thinking_to_request, is_thinking_enabled
+from app.services.kiro_anthropic_converter import KiroAnthropicConverter
+from app.utils.kiro_converters import is_thinking_enabled
 from app.schemas.anthropic import (
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
@@ -173,16 +174,16 @@ async def create_message(
                     content=error_response.model_dump()
                 )
         
-        # 将Anthropic请求转换为OpenAI格式
-        openai_request = AnthropicAdapter.anthropic_to_openai_request(request)
-
         # 提取thinking配置
         thinking_config = getattr(request, 'thinking', None)
         thinking_enabled = is_thinking_enabled(thinking_config)
 
-        # 如果是Kiro服务，应用thinking配置
+        # Kiro 通道：直接把 Anthropic Messages 转为 conversationState（参考 kiro.rs 结构）
+        # 其它通道：继续走 Anthropic -> OpenAI 转换，转发到 plug-in chat/completions
         if use_kiro:
-            openai_request = apply_thinking_to_request(openai_request, thinking_config)
+            upstream_request = KiroAnthropicConverter.to_kiro_chat_completions_request(request)
+        else:
+            upstream_request = AnthropicAdapter.anthropic_to_openai_request(request)
         
         # 准备额外的请求头
         extra_headers = {}
@@ -196,7 +197,7 @@ async def create_message(
                         # 使用Kiro服务
                         openai_stream = kiro_service.chat_completions_stream(
                             user_id=current_user.id,
-                            request_data=openai_request
+                            request_data=upstream_request
                         )
                     else:
                         # 使用Antigravity服务
@@ -204,7 +205,7 @@ async def create_message(
                             user_id=current_user.id,
                             method="POST",
                             path="/v1/chat/completions",
-                            json_data=openai_request,
+                            json_data=upstream_request,
                             extra_headers=extra_headers if extra_headers else None
                         )
                     
@@ -254,7 +255,7 @@ async def create_message(
                 # 使用Kiro服务的流式接口
                 openai_stream = kiro_service.chat_completions_stream(
                     user_id=current_user.id,
-                    request_data=openai_request
+                    request_data=upstream_request
                 )
             else:
                 # 使用Antigravity服务的流式接口
@@ -262,7 +263,7 @@ async def create_message(
                     user_id=current_user.id,
                     method="POST",
                     path="/v1/chat/completions",
-                    json_data=openai_request,
+                    json_data=upstream_request,
                     extra_headers=extra_headers if extra_headers else None
                 )
             

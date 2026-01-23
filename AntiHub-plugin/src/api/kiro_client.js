@@ -160,6 +160,83 @@ class KiroClient {
   }
 
   /**
+   * 直接使用已构造好的 CodeWhisperer 请求体（包含 conversationState），跳过 messages -> conversationState 的转换。
+   *
+   * 用途：后端已按 kiro.rs 的结构把 Anthropic Messages 转成 conversationState，这里只负责转发到 /generateAssistantResponse 并解析流。
+   */
+  async generateResponseWithCwRequest(cwRequest, model, callback, user_id, options = {}, accountOverride = null) {
+    const account = accountOverride || await this.getAvailableAccount(user_id, [], model);
+    const requestId = crypto.randomUUID().substring(0, 8);
+
+    logger.info(`[${requestId}] 开始Kiro请求(raw): model=${model}, user_id=${user_id}, account_id=${account.account_id}`);
+
+    if (!cwRequest || typeof cwRequest !== 'object' || !cwRequest.conversationState) {
+      throw new Error('cwRequest.conversationState 缺失，无法调用 Kiro');
+    }
+
+    const payload = { ...cwRequest };
+    if (typeof account.profile_arn === 'string' && account.profile_arn.trim()) {
+      payload.profileArn = account.profile_arn.trim();
+    }
+    const requestBody = JSON.stringify(payload);
+
+    return new Promise((resolve, reject) => {
+      const headers = kiroService.getCodeWhispererHeaders(account.access_token, account.machineid);
+      headers['Content-Length'] = Buffer.byteLength(requestBody);
+
+      const reqOptions = {
+        hostname: 'q.us-east-1.amazonaws.com',
+        path: '/generateAssistantResponse',
+        method: 'POST',
+        headers
+      };
+
+      const req = https.request(reqOptions, (res) => {
+        logger.info(`[${requestId}] 收到响应: status=${res.statusCode}`);
+
+        if (res.statusCode !== 200) {
+          let errorBody = '';
+          res.on('data', chunk => errorBody += chunk);
+          res.on('end', () => {
+            logger.error(`[${requestId}] API错误: ${res.statusCode} - ${errorBody}`);
+
+            // 402 或 403 错误时自动禁用账号
+            if (res.statusCode === 402 || res.statusCode === 403) {
+              kiroAccountService.updateAccountStatus(account.account_id, 0);
+              logger.warn(`Kiro账号已禁用(${res.statusCode}): account_id=${account.account_id}`);
+            }
+
+            reject(new Error(`错误: ${res.statusCode} ${errorBody}`));
+          });
+          return;
+        }
+
+        const contextInfo = {
+          user_id,
+          account_id: account.account_id,
+          model_id: model,
+          is_shared: account.is_shared
+        };
+
+        this.handleStreamResponse(res, callback, requestId, contextInfo)
+          .then(() => {
+            logger.info(`[${requestId}] 请求完成`);
+            resolve();
+          })
+          .catch(reject);
+      });
+
+      req.on('error', (error) => {
+        logger.error(`[${requestId}] 请求异常:`, error.message);
+        reject(error);
+      });
+
+      req.write(requestBody);
+      req.end();
+    });
+  }
+
+  /**
    * MCP WebSearch（模型内置联网）
    * - 不走 generateAssistantResponse
    * - 直接调用 /mcp tools/call(web_search)

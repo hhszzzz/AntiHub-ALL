@@ -912,9 +912,11 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
   req.setTimeout(600000); // 10分钟 = 600000毫秒
   res.setTimeout(600000);
 
-  const { messages, model, stream = true, tools, tool_choice } = req.body;
+  const { messages, model, stream = true, tools, tool_choice, conversationState, conversation_state } = req.body;
+  const rawConversationState = conversationState || conversation_state;
+  const hasConversationState = rawConversationState && typeof rawConversationState === 'object';
 
-  if (!messages) {
+  if (!messages && !hasConversationState) {
     return res.status(400).json({ error: 'messages是必需的' });
   }
 
@@ -926,11 +928,14 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
 
   // 模型内置联网（对接 Kiro MCP web_search）
   // 参考 kiro.rs：仅当 tools 只包含一个 web_search 时，走内置 WebSearch 分支。
-  const getToolName = (t) => (t?.function?.name || t?.name || '').toString();
+  const getToolName = (t) => (t?.function?.name || t?.name || t?.toolSpecification?.name || t?.tool_specification?.name || '').toString();
+  const effectiveTools = hasConversationState
+    ? rawConversationState?.currentMessage?.userInputMessage?.userInputMessageContext?.tools
+    : tools;
   const isWebSearchOnly =
-    Array.isArray(tools) &&
-    tools.length === 1 &&
-    getToolName(tools[0]).trim().toLowerCase() === 'web_search';
+    Array.isArray(effectiveTools) &&
+    effectiveTools.length === 1 &&
+    getToolName(effectiveTools[0]).trim().toLowerCase() === 'web_search';
 
   const extractTextFromContent = (content) => {
     if (typeof content === 'string') return content;
@@ -1023,7 +1028,28 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
   };
 
   // 计算输入token数
-  const inputText = messages.map(m => {
+  const buildPseudoMessagesFromConversationState = (cs) => {
+    const out = [];
+    const history = Array.isArray(cs?.history) ? cs.history : [];
+
+    for (const h of history) {
+      if (h?.userInputMessage) {
+        out.push({ role: 'user', content: h.userInputMessage.content ?? '' });
+      } else if (h?.assistantResponseMessage) {
+        out.push({ role: 'assistant', content: h.assistantResponseMessage.content ?? '' });
+      }
+    }
+
+    out.push({
+      role: 'user',
+      content: typeof cs?.currentMessage?.userInputMessage?.content === 'string' ? cs.currentMessage.userInputMessage.content : ''
+    });
+
+    return out;
+  };
+
+  const promptMessages = hasConversationState ? buildPseudoMessagesFromConversationState(rawConversationState) : messages;
+  const inputText = promptMessages.map(m => {
     if (typeof m.content === 'string') return m.content;
     if (Array.isArray(m.content)) {
       return m.content.filter(c => c.type === 'text').map(c => c.text).join('');
@@ -1079,7 +1105,7 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
 
       // WebSearch: 直接走 Kiro MCP，并把结果转换为 OpenAI ChatCompletion SSE
       if (isWebSearchOnly) {
-        const query = extractWebSearchQuery(messages);
+        const query = extractWebSearchQuery(promptMessages);
         if (!query) {
           responseEnded = true;
           if (keepAliveTimer) {
@@ -1150,7 +1176,11 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
         return;
       }
 
-      await kiroClient.generateResponse(messages, model, (data) => {
+      const generate = hasConversationState
+        ? kiroClient.generateResponseWithCwRequest.bind(kiroClient, { conversationState: rawConversationState })
+        : kiroClient.generateResponse.bind(kiroClient, messages);
+
+      await generate(model, (data) => {
         // 如果响应已结束，不再写入数据
         if (responseEnded) {
           return;
@@ -1345,7 +1375,7 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
     // 非流式响应
     try {
       if (isWebSearchOnly) {
-        const query = extractWebSearchQuery(messages);
+        const query = extractWebSearchQuery(promptMessages);
         if (!query) {
           return res.status(400).json({ error: '无法从 messages 中提取 web_search query' });
         }
@@ -1379,7 +1409,11 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
       let toolCallArgs = ''; // 累积工具调用参数用于token计算
       const toolCallsMap = new Map(); // 使用 Map 来跟踪多个工具调用
 
-      await kiroClient.generateResponse(messages, model, (data) => {
+      const generate = hasConversationState
+        ? kiroClient.generateResponseWithCwRequest.bind(kiroClient, { conversationState: rawConversationState })
+        : kiroClient.generateResponse.bind(kiroClient, messages);
+
+      await generate(model, (data) => {
         if (data.type === 'tool_call_start') {
           // 开始新的工具调用
           const toolCall = data.tool_calls[0];
