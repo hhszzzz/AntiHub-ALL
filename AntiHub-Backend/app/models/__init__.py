@@ -8,6 +8,7 @@ from app.models.plugin_api_key import PluginAPIKey
 from app.models.api_key import APIKey
 from app.models.usage_log import UsageLog
 from app.models.codex_account import CodexAccount
+from app.models.gemini_cli_account import GeminiCLIAccount
 
 __all__ = [
     "User",
@@ -16,4 +17,5 @@ __all__ = [
     "APIKey",
     "UsageLog",
     "CodexAccount",
+    "GeminiCLIAccount",
 ]

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from app.models.plugin_api_key import PluginAPIKey
     from app.models.api_key import APIKey
     from app.models.codex_account import CodexAccount
+    from app.models.gemini_cli_account import GeminiCLIAccount
 
 
 class User(Base):
@@ -138,7 +139,13 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
-    
+
+    gemini_cli_accounts: Mapped[list["GeminiCLIAccount"]] = relationship(
+        "GeminiCLIAccount",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
     # 索引定义
     __table_args__ = (
         Index("ix_users_username", "username"),

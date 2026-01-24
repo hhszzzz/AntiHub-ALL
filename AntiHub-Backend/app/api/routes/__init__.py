@@ -13,6 +13,7 @@ from app.api.routes.qwen import router as qwen_router
 from app.api.routes.anthropic import router as anthropic_router
 from app.api.routes.gemini import router as gemini_router
 from app.api.routes.codex import router as codex_router
+from app.api.routes.gemini_cli import router as gemini_cli_router
 
 __all__ = [
     "auth_router",
@@ -27,4 +28,5 @@ __all__ = [
     "anthropic_router",
     "gemini_router",
     "codex_router",
+    "gemini_cli_router",
 ]
