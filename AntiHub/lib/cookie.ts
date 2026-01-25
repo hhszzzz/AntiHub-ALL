@@ -9,11 +9,7 @@ function normalizeCookieHttpMode(value: string | undefined): CookieHttpMode {
 }
 
 export function getCookieHttpMode(): CookieHttpMode {
-  // 兼容两种命名：
-  // - COOKIE_HTTP：推荐（Next.js/Compose 生态最稳）
-  // - Cookie-Http：按你的需求命名（用于直接控制 Secure 行为）
-  const raw = process.env.COOKIE_HTTP ?? process.env['Cookie-Http'];
-  return normalizeCookieHttpMode(raw);
+  return normalizeCookieHttpMode(process.env.COOKIE_HTTP);
 }
 
 export function getCookieSecure(): boolean {

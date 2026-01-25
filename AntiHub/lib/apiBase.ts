@@ -1,6 +1,6 @@
 const DEFAULT_DEV_API_BASE_URL = 'http://localhost:8008';
 const DEFAULT_PROD_PUBLIC_API_BASE_URL = '/backend';
-const DEFAULT_PROD_INTERNAL_API_BASE_URL = 'http://antihub-backend:8000';
+const DEFAULT_PROD_BACKEND_INTERNAL_URL = 'http://antihub-backend:8000';
 
 function isAbsoluteUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
@@ -11,7 +11,7 @@ function normalizeEnvValue(value: string | undefined): string | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
 
-  // dotenv/平台可能把值包一层引号：INTERNAL_API_BASE_URL="http://..."
+  // dotenv/平台可能把值包一层引号：BACKEND_INTERNAL_URL="http://..."
   const unquoted = trimmed.replace(/^(['"])(.*)\1$/, '$2').trim();
   if (!unquoted) return undefined;
 
@@ -38,16 +38,14 @@ export function getPublicApiBaseUrl(): string {
 }
 
 export function getInternalApiBaseUrl(): string {
-  const envInternal =
-    normalizeInternalBaseUrl(process.env.INTERNAL_API_BASE_URL) ||
-    normalizeInternalBaseUrl(process.env.BACKEND_INTERNAL_URL);
+  const envInternal = normalizeInternalBaseUrl(process.env.BACKEND_INTERNAL_URL);
   if (envInternal) return envInternal;
 
   const publicBase = getPublicApiBaseUrl();
   if (isAbsoluteUrl(publicBase)) return publicBase.replace(/\/+$/, '');
 
   return process.env.NODE_ENV === 'production'
-    ? DEFAULT_PROD_INTERNAL_API_BASE_URL
+    ? DEFAULT_PROD_BACKEND_INTERNAL_URL
     : DEFAULT_DEV_API_BASE_URL;
 }
 
