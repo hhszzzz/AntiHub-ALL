@@ -129,7 +129,7 @@ async def list_models(
         if use_codex:
             result = await codex_service.openai_list_models()
         elif use_gemini_cli:
-            result = await gemini_cli_service.openai_list_models()
+            result = await gemini_cli_service.openai_list_models(user_id=current_user.id)
         elif use_kiro:
             # 检查 beta 权限（管理员放行）
             if current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:

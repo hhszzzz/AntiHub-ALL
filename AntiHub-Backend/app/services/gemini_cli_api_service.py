@@ -34,6 +34,9 @@ from app.services.gemini_cli_service import (
 
 logger = logging.getLogger(__name__)
 
+MODELS_CACHE_TTL_SECONDS = 24 * 60 * 60
+MODELS_FALLBACK_CACHE_TTL_SECONDS = 5 * 60
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -744,10 +747,6 @@ class GeminiCLIAPIService:
         "gemini-2.5-pro",
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-2.0-pro",
-        "gemini-2.5-flash-image-preview",
     ]
 
     def __init__(self, db: AsyncSession, redis: RedisClient):
@@ -756,8 +755,73 @@ class GeminiCLIAPIService:
         self.repo = GeminiCLIAccountRepository(db)
         self.account_service = GeminiCLIService(db, redis)
 
-    async def openai_list_models(self) -> Dict[str, Any]:
-        return {"object": "list", "data": [{"id": m, "object": "model"} for m in self.SUPPORTED_MODELS]}
+    async def openai_list_models(self, *, user_id: int) -> Dict[str, Any]:
+        models = await self._get_models_best_effort(user_id=user_id)
+        return {"object": "list", "data": [{"id": m, "object": "model"} for m in models]}
+
+    def _models_cache_key(self, user_id: int) -> str:
+        return f"gemini_cli_models:{user_id}"
+
+    async def _get_models_best_effort(self, *, user_id: int) -> List[str]:
+        cache_key = self._models_cache_key(user_id)
+        try:
+            cached = await self.redis.get_json(cache_key)
+            if isinstance(cached, list) and cached:
+                models = [str(x).strip() for x in cached if str(x).strip()]
+                if models:
+                    return models
+        except Exception:
+            pass
+
+        models_from_quota = await self._fetch_models_from_quota_best_effort(user_id=user_id)
+        models = models_from_quota or list(self.SUPPORTED_MODELS)
+        ttl = MODELS_CACHE_TTL_SECONDS if models_from_quota else MODELS_FALLBACK_CACHE_TTL_SECONDS
+
+        try:
+            await self.redis.set_json(cache_key, models, expire=ttl)
+        except Exception:
+            pass
+
+        return models
+
+    async def _fetch_models_from_quota_best_effort(self, *, user_id: int) -> List[str]:
+        """
+        尝试从 retrieveUserQuota 的 buckets 里拿 model_id（更贴近账号真实可用模型）。
+
+        失败/为空就返回 []，调用方兜底用写死列表。
+        """
+        try:
+            accounts = await self.repo.list_enabled_by_user_id(user_id)
+            if not accounts:
+                return []
+
+            account = accounts[0]
+            quota = await self.account_service.get_account_quota(user_id, int(account.id))
+            data = quota.get("data") if isinstance(quota, dict) else None
+            if not isinstance(data, dict):
+                return []
+
+            buckets = data.get("buckets")
+            if not isinstance(buckets, list):
+                return []
+
+            out: List[str] = []
+            seen = set()
+            for b in buckets:
+                if not isinstance(b, dict):
+                    continue
+                mid = b.get("model_id") or b.get("modelId")
+                if not isinstance(mid, str):
+                    continue
+                mid = mid.strip()
+                if not mid or mid in seen:
+                    continue
+                seen.add(mid)
+                out.append(mid)
+
+            return out
+        except Exception:
+            return []
 
     async def _prepare_account(self, user_id: int) -> Tuple[str, str]:
         """
