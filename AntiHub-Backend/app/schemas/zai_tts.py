@@ -4,6 +4,7 @@ ZAI TTS 账号相关的数据模型
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -35,8 +36,8 @@ class ZaiTTSAccountResponse(BaseModel):
     status: int
     zai_user_id: str
     voice_id: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    last_used_at: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "populate_by_name": True}

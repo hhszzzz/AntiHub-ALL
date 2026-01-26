@@ -43,6 +43,11 @@ services:
       JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
 
+      # ZAI TTS（可选）
+      ZAI_TTS_BASE_URL: ${ZAI_TTS_BASE_URL:-https://audio.z.ai}
+      # 非流式音频文件最多保留数量（容器重启会清空 storage/tts）
+      ZAI_TTS_FILE_KEEP_COUNT: ${ZAI_TTS_FILE_KEEP_COUNT:-10}
+
       # 管理员账号配置（首次启动时自动创建）
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
