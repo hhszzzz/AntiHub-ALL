@@ -232,6 +232,70 @@ export default function AccountsPage() {
       .replace(/\//g, '-');
   };
 
+  // Gemini 模型分层分组
+  type GeminiTier = 'Pro' | 'Flash' | 'Other';
+  interface GeminiTierGroup {
+    tier: GeminiTier;
+    remaining_fraction: number | null;
+    reset_time: string | null;
+  }
+
+  const getGeminiModelTier = (modelId: string): GeminiTier => {
+    const lower = modelId.toLowerCase();
+    // Flash 层（包含 Flash Lite）
+    if (lower.includes('flash')) {
+      return 'Flash';
+    }
+    // Pro 层
+    if (lower.includes('pro')) {
+      return 'Pro';
+    }
+    return 'Other';
+  };
+
+  const groupGeminiQuotaByTier = (buckets: GeminiCLIQuotaData['buckets']): GeminiTierGroup[] => {
+    const tierMap = new Map<GeminiTier, { fractions: number[]; resetTimes: string[] }>();
+    const tierOrder: GeminiTier[] = ['Pro', 'Flash', 'Other'];
+
+    for (const bucket of buckets) {
+      const tier = getGeminiModelTier(bucket.model_id);
+      if (!tierMap.has(tier)) {
+        tierMap.set(tier, { fractions: [], resetTimes: [] });
+      }
+      const group = tierMap.get(tier)!;
+      if (bucket.remaining_fraction !== null && bucket.remaining_fraction !== undefined) {
+        group.fractions.push(bucket.remaining_fraction);
+      }
+      if (bucket.reset_time) {
+        group.resetTimes.push(bucket.reset_time);
+      }
+    }
+
+    const result: GeminiTierGroup[] = [];
+    for (const tier of tierOrder) {
+      const group = tierMap.get(tier);
+      if (!group || group.fractions.length === 0) continue;
+
+      // 取最小剩余比例（最保守估计）
+      const minFraction = group.fractions.length > 0
+        ? Math.min(...group.fractions)
+        : null;
+
+      // 取最早的重置时间
+      const earliestReset = group.resetTimes.length > 0
+        ? group.resetTimes.sort()[0]
+        : null;
+
+      result.push({
+        tier,
+        remaining_fraction: minFraction,
+        reset_time: earliestReset,
+      });
+    }
+
+    return result;
+  };
+
   const loadAccounts = async () => {
     try {
       // 加载反重力账号
@@ -2532,24 +2596,29 @@ export default function AccountsPage() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead className="min-w-[220px]">模型</TableHead>
+                          <TableHead className="min-w-[120px]">层级</TableHead>
                           <TableHead className="min-w-[120px]">剩余比例</TableHead>
-                          <TableHead className="min-w-[220px]">重置时间</TableHead>
+                          <TableHead className="min-w-[200px]">重置时间</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {geminiCliQuotaData.buckets.map((bucket, idx) => (
-                          <TableRow key={`${bucket.model_id}-${bucket.token_type ?? 'default'}-${idx}`}>
-                            <TableCell className="font-mono text-xs md:text-sm break-all">
-                              {bucket.model_id}
+                        {groupGeminiQuotaByTier(geminiCliQuotaData.buckets).map((group) => (
+                          <TableRow key={group.tier}>
+                            <TableCell className="font-medium text-sm">
+                              <Badge variant={
+                                group.tier === 'Pro' ? 'default' :
+                                group.tier === 'Flash' ? 'secondary' : 'outline'
+                              }>
+                                {group.tier}
+                              </Badge>
                             </TableCell>
                             <TableCell className="font-mono text-xs md:text-sm">
-                              {bucket.remaining_fraction === null || bucket.remaining_fraction === undefined
+                              {group.remaining_fraction === null || group.remaining_fraction === undefined
                                 ? '-'
-                                : `${(bucket.remaining_fraction * 100).toFixed(1)}%`}
+                                : `${(group.remaining_fraction * 100).toFixed(1)}%`}
                             </TableCell>
-                            <TableCell className="text-xs md:text-sm text-muted-foreground break-all">
-                              {formatGeminiCliResetTime(bucket.reset_time)}
+                            <TableCell className="text-xs md:text-sm text-muted-foreground">
+                              {formatGeminiCliResetTime(group.reset_time)}
                             </TableCell>
                           </TableRow>
                         ))}
