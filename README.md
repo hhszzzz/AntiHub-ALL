@@ -62,6 +62,22 @@ docker compose -f docker-compose.yml -f docker/docker-compose.db-init.yml run --
 cp .env.example .env
 ```
 
+**重要提示**：`.env.example` 中包含示例密钥，仅用于开发/测试。生产环境部署时，请务必生成新的密钥：
+
+```bash
+# 生成加密密钥
+docker compose run --rm backend python generate_encryption_key.py
+
+# 或使用 openssl 生成其他密钥
+openssl rand -base64 32  # 用于 JWT_SECRET_KEY
+openssl rand -hex 32     # 用于 PLUGIN_ADMIN_API_KEY
+```
+
+然后更新 `.env` 文件中的以下配置：
+- `JWT_SECRET_KEY` - JWT 令牌签名密钥
+- `PLUGIN_ADMIN_API_KEY` - Plugin 管理 API 密钥
+- `PLUGIN_API_ENCRYPTION_KEY` - Fernet 加密密钥（用于加密存储用户 API 密钥）
+
 2) 启动：
 
 ```bash
@@ -88,4 +104,5 @@ docker compose up -d
 - [KiroGate](https://github.com/aliom-v/KiroGate) - Kiro渠道的Token导入、思考支持
 - [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) - Kiro AWS IMA账户导入代码
 - [ZAI-TTS2API](https://github.com/aahl/zai-tts2api) - ZAI-TTS对接代码
+
 - [Kiro.rs](https://github.com/hank9999/kiro.rs) - CC2.1.19新字段解析方法代码
