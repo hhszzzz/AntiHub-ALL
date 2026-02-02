@@ -268,17 +268,38 @@ export default function AccountsPage() {
   };
 
   const groupGeminiQuotaByTier = (buckets: GeminiCLIQuotaData['buckets']): GeminiTierGroup[] => {
-    const tierMap = new Map<GeminiTier, { fractions: number[]; resetTimes: string[] }>();
+    const pickEarlierResetTime = (current: string | null, next: string | null): string | null => {
+      if (!current) return next;
+      if (!next) return current;
+      const currentTime = new Date(current).getTime();
+      const nextTime = new Date(next).getTime();
+      if (Number.isNaN(currentTime)) return next;
+      if (Number.isNaN(nextTime)) return current;
+      return currentTime <= nextTime ? current : next;
+    };
+
+    const tierMap = new Map<
+      GeminiTier,
+      {
+        fractions: number[];
+        resetTimes: string[];
+        items: Array<{ fraction: number; reset_time: string | null }>;
+      }
+    >();
     const tierOrder: GeminiTier[] = ['Pro', 'Flash', 'Other'];
 
     for (const bucket of buckets) {
       const tier = getGeminiModelTier(bucket.model_id);
       if (!tierMap.has(tier)) {
-        tierMap.set(tier, { fractions: [], resetTimes: [] });
+        tierMap.set(tier, { fractions: [], resetTimes: [], items: [] });
       }
       const group = tierMap.get(tier)!;
       if (bucket.remaining_fraction !== null && bucket.remaining_fraction !== undefined) {
         group.fractions.push(bucket.remaining_fraction);
+        group.items.push({
+          fraction: bucket.remaining_fraction,
+          reset_time: bucket.reset_time ? bucket.reset_time : null,
+        });
       }
       if (bucket.reset_time) {
         group.resetTimes.push(bucket.reset_time);
@@ -295,10 +316,25 @@ export default function AccountsPage() {
         ? Math.min(...group.fractions)
         : null;
 
-      // 取最早的重置时间
-      const earliestReset = group.resetTimes.length > 0
-        ? group.resetTimes.sort()[0]
-        : null;
+      // 重置时间要与 “最小 remaining_fraction” 对应的 bucket 对齐，否则展示会漂（甚至变成当前时间）。
+      let earliestReset: string | null = null;
+      if (minFraction !== null) {
+        const minResetTimes = group.items
+          .filter((it) => it.fraction === minFraction && it.reset_time)
+          .map((it) => it.reset_time as string);
+        if (minResetTimes.length > 0) {
+          earliestReset = minResetTimes.reduce<string | null>(
+            (acc, t) => pickEarlierResetTime(acc, t),
+            null
+          );
+        }
+      }
+      if (!earliestReset) {
+        earliestReset = group.resetTimes.reduce<string | null>(
+          (acc, t) => pickEarlierResetTime(acc, t),
+          null
+        );
+      }
 
       result.push({
         tier,
