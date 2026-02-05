@@ -956,6 +956,16 @@ export async function getAPIKeyInfo(): Promise<PluginAPIKey | null> {
 }
 
 /**
+ * 获取指定 API Key 详情（包含完整 key）
+ */
+export async function getAPIKey(keyId: number): Promise<CreateAPIKeyResponse> {
+  return fetchWithAuth<CreateAPIKeyResponse>(
+    `${API_BASE_URL}/api/api-keys/${keyId}`,
+    { method: 'GET' }
+  );
+}
+
+/**
  * 生成新的 API Key
  */
 export async function generateAPIKey(
@@ -2401,11 +2411,13 @@ export interface CodexFallbackConfig {
   base_url: string | null;
   has_key: boolean;
   api_key_masked?: string | null;
+  api_key?: string | null;
 }
 
-export async function getCodexFallbackConfig(): Promise<CodexFallbackConfig> {
+export async function getCodexFallbackConfig(options: { reveal_key?: boolean } = {}): Promise<CodexFallbackConfig> {
+  const query = options.reveal_key ? '?reveal_key=true' : '';
   const result = await fetchWithAuth<{ success: boolean; data: CodexFallbackConfig }>(
-    `${API_BASE_URL}/api/codex/fallback`,
+    `${API_BASE_URL}/api/codex/fallback${query}`,
     { method: 'GET' }
   );
   return result.data;

@@ -850,24 +850,31 @@ class CodexService:
         models = _get_supported_models()
         return {"object": "list", "data": [{"id": m, "object": "model"} for m in models]}
 
-    async def get_fallback_config(self, *, user_id: int) -> Dict[str, Any]:
+    async def get_fallback_config(self, *, user_id: int, reveal_key: bool = False) -> Dict[str, Any]:
         """
-        获取 CodexCLI 兜底服务配置（不返回明文 KEY）。
+        获取 CodexCLI 兜底服务配置。
+
+        约定：
+        - 默认不返回明文 KEY
+        - 当 reveal_key=True 时，返回 api_key 明文（仅当前用户可读）
         """
         cfg = await self.fallback_repo.get_by_user_id(user_id)
         if not cfg or not getattr(cfg, "is_active", True):
-            return {
+            data = {
                 "success": True,
                 "data": {
                     "platform": CODEX_FALLBACK_PLATFORM,
                     "base_url": None,
                     "has_key": False,
                     "api_key_masked": None,
+                    **({"api_key": None} if reveal_key else {}),
                 },
             }
+            return data
 
         masked = None
         has_key = False
+        raw_key = None
         try:
             raw_key = decrypt_secret(cfg.api_key)
             if (raw_key or "").strip():
@@ -877,16 +884,19 @@ class CodexService:
             # 解密失败按“未配置”处理，避免把异常扩散到设置页
             has_key = False
             masked = None
+            raw_key = None
 
-        return {
+        data: Dict[str, Any] = {
             "success": True,
             "data": {
                 "platform": CODEX_FALLBACK_PLATFORM,
                 "base_url": cfg.base_url,
                 "has_key": has_key,
                 "api_key_masked": masked,
+                **({"api_key": raw_key if has_key else None} if reveal_key else {}),
             },
         }
+        return data
 
     async def upsert_fallback_config(
         self,
