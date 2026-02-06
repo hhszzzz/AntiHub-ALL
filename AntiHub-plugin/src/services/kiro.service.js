@@ -78,7 +78,6 @@ const KIRO_REDIRECT_URI = 'kiro://kiro.kiroAgent/authenticate-success';
  * Kiro 模型映射
  */
 const KIRO_MODEL_MAP = {
-  'claude-sonnet-4-5': 'claude-sonnet-4.5',
   'claude-sonnet-4-5-20250929': 'claude-sonnet-4.5',
   'claude-sonnet-4-20250514': 'claude-sonnet-4',
   'claude-opus-4-5-20251101': 'claude-opus-4.5',
