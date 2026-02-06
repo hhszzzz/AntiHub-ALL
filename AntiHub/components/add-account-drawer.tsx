@@ -58,6 +58,15 @@ interface KiroBatchImportResult {
   message?: string;
 }
 
+type AwsIdcJsonImportStatus = 'pending' | 'success' | 'error';
+
+interface AwsIdcJsonImportResult {
+  index: number;
+  status: AwsIdcJsonImportStatus;
+  accountName?: string;
+  message?: string;
+}
+
 type AntiHookOS = 'windows' | 'darwin' | 'linux';
 type AntiHookArch = 'amd64' | 'arm64';
 
@@ -84,6 +93,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
   const kiroBatchCancelRef = useRef(false);
+  const kiroAwsIdcJsonCancelRef = useRef(false);
   const [step, setStep] = useState<
     'platform' | 'kiro_provider' | 'method' | 'authorize'
   >('platform');
@@ -92,7 +102,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [loginMethod, setLoginMethod] = useState<'manual' | 'refresh_token' | ''>(''); // Antigravity 登录方式
   const [kiroLoginMethod, setKiroLoginMethod] = useState<'oauth' | 'refresh_token' | ''>('');
   const [kiroAwsIdcMethod, setKiroAwsIdcMethod] = useState<
-    'device_code' | 'manual_import' | ''
+    'device_code' | 'manual_import' | 'json_import' | ''
   >('');
   const [kiroAwsIdcRegion, setKiroAwsIdcRegion] = useState('us-east-1');
   const [qwenLoginMethod, setQwenLoginMethod] = useState<'oauth' | 'json'>('oauth');
@@ -102,7 +112,20 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [kiroImportRefreshToken, setKiroImportRefreshToken] = useState('');
   const [kiroImportClientId, setKiroImportClientId] = useState('');
   const [kiroImportClientSecret, setKiroImportClientSecret] = useState('');
-  const [kiroImportAccountName, setKiroImportAccountName] = useState('');
+  const [kiroAwsIdcJsonText, setKiroAwsIdcJsonText] = useState('');
+  const [kiroAwsIdcJsonFieldMap, setKiroAwsIdcJsonFieldMap] = useState<{
+    refresh_token: string;
+    client_id: string;
+    client_secret: string;
+    region: string;
+  }>({
+    refresh_token: '',
+    client_id: '',
+    client_secret: '',
+    region: '',
+  });
+  const [kiroAwsIdcJsonResults, setKiroAwsIdcJsonResults] = useState<AwsIdcJsonImportResult[]>([]);
+  const [isKiroAwsIdcJsonImporting, setIsKiroAwsIdcJsonImporting] = useState(false);
   const [antigravityImportRefreshToken, setAntigravityImportRefreshToken] = useState('');
   const [qwenCredentialJson, setQwenCredentialJson] = useState('');
   const [qwenAccountName, setQwenAccountName] = useState('');
@@ -251,19 +274,38 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         setKiroAwsIdcExpiresAt('');
         setKiroAwsIdcIntervalSeconds(5);
         setKiroAwsIdcRegion('us-east-1');
+        setKiroAwsIdcJsonText('');
+        setKiroAwsIdcJsonFieldMap({
+          refresh_token: '',
+          client_id: '',
+          client_secret: '',
+          region: '',
+        });
+        setKiroAwsIdcJsonResults([]);
+        setIsKiroAwsIdcJsonImporting(false);
         setCountdown(600);
         setIsWaitingAuth(false);
-        setStep('authorize');
+        setStep('method');
         return;
       }
 
       setStep('method');
     } else if (step === 'method') {
       if (platform === 'kiro') {
-        if (!kiroLoginMethod) {
+        if (kiroProvider === 'social' && !kiroLoginMethod) {
           toasterRef.current?.show({
             title: '选择方式',
             message: '请选择添加方式',
+            variant: 'warning',
+            position: 'top-right',
+          });
+          return;
+        }
+
+        if (kiroProvider === 'aws_idc' && !kiroAwsIdcMethod) {
+          toasterRef.current?.show({
+            title: '选择方式',
+            message: '请选择导入方式',
             variant: 'warning',
             position: 'top-right',
           });
@@ -405,6 +447,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         setCountdown(600);
       }
 
+      kiroAwsIdcJsonCancelRef.current = true;
+      setIsKiroAwsIdcJsonImporting(false);
+
       if (platform === 'qwen') {
         setStep('method');
         setQwenLoginMethod('oauth');
@@ -417,6 +462,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         setStep('method');
         setGeminiCliLoginMethod('oauth');
       } else if (platform === 'antigravity') {
+        setStep('method');
+      } else if (platform === 'kiro') {
         setStep('method');
       } else {
         setStep('kiro_provider');
@@ -778,13 +825,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       return;
     }
 
-    const accountName = kiroImportAccountName.trim();
-
     try {
       await createKiroAccount({
         refresh_token: refreshToken,
         auth_method: 'Social',
-        account_name: accountName || undefined,
         is_shared: 0,
       });
 
@@ -972,21 +1016,11 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   };
 
   const handleImportKiroAwsIdcAccount = async () => {
-    const accountName = kiroImportAccountName.trim();
     const refreshToken = kiroImportRefreshToken.trim();
     const clientId = kiroImportClientId.trim();
     const clientSecret = kiroImportClientSecret.trim();
     const region = kiroAwsIdcRegion.trim();
 
-    if (!accountName) {
-      toasterRef.current?.show({
-        title: '输入错误',
-        message: '请填写 account_name（用于区分你的 Builder ID 账号）',
-        variant: 'warning',
-        position: 'top-right',
-      });
-      return;
-    }
     if (!refreshToken || !clientId || !clientSecret) {
       toasterRef.current?.show({
         title: '输入错误',
@@ -1002,7 +1036,6 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         refreshToken,
         clientId,
         clientSecret,
-        accountName,
         isShared: 0,
         region: region || undefined,
       });
@@ -1029,6 +1062,189 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
   };
 
+  const handleImportKiroAwsIdcJson = async () => {
+    const raw = kiroAwsIdcJsonText.replace(/^\uFEFF/, '').trim();
+    if (!raw) {
+      toasterRef.current?.show({
+        title: '输入错误',
+        message: '请粘贴 JSON 内容',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    if (isKiroAwsIdcJsonImporting) return;
+
+    kiroAwsIdcJsonCancelRef.current = false;
+
+    let parsed: unknown;
+    const normalized = raw.replace(/，/g, ',');
+    try {
+      parsed = JSON.parse(normalized);
+    } catch {
+      try {
+        parsed = JSON.parse(`[${normalized}]`);
+      } catch {
+        toasterRef.current?.show({
+          title: 'JSON 格式错误',
+          message: '请输入有效 JSON（支持 JSON 对象或 JSON 数组；也支持多个对象用逗号分隔）',
+          variant: 'warning',
+          position: 'top-right',
+        });
+        return;
+      }
+    }
+
+    const items: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+    if (items.length === 0) {
+      toasterRef.current?.show({
+        title: '没有可导入项',
+        message: 'JSON 为空，请检查输入内容',
+        variant: 'warning',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    const toStringValue = (value: unknown) => {
+      if (typeof value === 'string') return value.trim();
+      if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+      return '';
+    };
+
+    const pickValue = (
+      obj: Record<string, unknown>,
+      mappedKeys: string,
+      fallbacks: string[]
+    ) => {
+      const keys = mappedKeys
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean);
+      const candidates = keys.length > 0 ? keys : fallbacks;
+      for (const key of candidates) {
+        const v = toStringValue(obj[key]);
+        if (v) return v;
+      }
+      return '';
+    };
+
+    setKiroAwsIdcJsonResults(
+      items.map((_, idx) => ({
+        index: idx + 1,
+        status: 'pending',
+        message: '等待导入',
+      }))
+    );
+    setIsKiroAwsIdcJsonImporting(true);
+
+    let successCount = 0;
+    let failedCount = 0;
+
+    const updateResult = (index: number, patch: Partial<AwsIdcJsonImportResult>) => {
+      setKiroAwsIdcJsonResults((prev) =>
+        prev.map((r) => (r.index === index ? { ...r, ...patch } : r))
+      );
+    };
+
+    for (let idx = 0; idx < items.length; idx++) {
+      if (kiroAwsIdcJsonCancelRef.current) break;
+
+      const index = idx + 1;
+      const item = items[idx];
+
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        failedCount++;
+        updateResult(index, { status: 'error', message: '仅支持 JSON 对象（或对象数组）' });
+        continue;
+      }
+
+      const obj = item as Record<string, unknown>;
+
+      const refreshToken = pickValue(obj, kiroAwsIdcJsonFieldMap.refresh_token, [
+        'refresh_token',
+        'refreshToken',
+        'RefreshToken',
+        'rt',
+        'RT',
+      ]);
+      const clientId = pickValue(obj, kiroAwsIdcJsonFieldMap.client_id, [
+        'client_id',
+        'clientId',
+        'cid',
+        'client-id',
+      ]);
+      const clientSecret = pickValue(obj, kiroAwsIdcJsonFieldMap.client_secret, [
+        'client_secret',
+        'clientSecret',
+        'csecret',
+        'client-secret',
+      ]);
+      const regionFromItem = pickValue(obj, kiroAwsIdcJsonFieldMap.region, [
+        'region',
+        'aws_region',
+        'awsRegion',
+        'region-id',
+        'region_id',
+      ]);
+
+      if (!refreshToken || !clientId || !clientSecret) {
+        failedCount++;
+        updateResult(index, {
+          status: 'error',
+          message: '缺少 refresh_token / client_id / client_secret（可通过字段映射指定字段名）',
+        });
+        continue;
+      }
+
+      updateResult(index, { status: 'pending', message: '导入中...' });
+
+      try {
+        const region = (regionFromItem || kiroAwsIdcRegion).trim();
+        const account = await importKiroAwsIdcAccount({
+          refreshToken,
+          clientId,
+          clientSecret,
+          isShared: 0,
+          region: region || undefined,
+        });
+
+        successCount++;
+        updateResult(index, {
+          status: 'success',
+          accountName: account.account_name || undefined,
+          message: '成功',
+        });
+      } catch (err) {
+        failedCount++;
+        updateResult(index, {
+          status: 'error',
+          message: err instanceof Error ? err.message : '导入失败',
+        });
+      }
+    }
+
+    setIsKiroAwsIdcJsonImporting(false);
+
+    if (kiroAwsIdcJsonCancelRef.current) return;
+
+    if (successCount > 0) {
+      window.dispatchEvent(new CustomEvent('accountAdded'));
+      onSuccess?.();
+    }
+
+    const variant =
+      successCount === 0 ? 'error' : failedCount > 0 ? 'warning' : 'success';
+
+    toasterRef.current?.show({
+      title: 'JSON 导入完成',
+      message: `成功 ${successCount}，失败 ${failedCount}`,
+      variant,
+      position: 'top-right',
+    });
+  };
+
   const handleStartKiroOAuth = async (provider: 'Google' | 'Github') => {
     try {
       const result = await getKiroOAuthAuthorizeUrl(provider, 0);
@@ -1053,17 +1269,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   };
 
   const handleStartKiroAwsIdcDevice = async () => {
-    const accountName = kiroImportAccountName.trim();
     const region = kiroAwsIdcRegion.trim();
-    if (!accountName) {
-      toasterRef.current?.show({
-        title: '输入错误',
-        message: '请先填写 account_name（用于区分你的 Builder ID 账号）',
-        variant: 'warning',
-        position: 'top-right',
-      });
-      return;
-    }
 
     try {
       setKiroAwsIdcStatus('pending');
@@ -1077,7 +1283,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       setKiroAwsIdcIntervalSeconds(5);
 
       const result = await kiroAwsIdcDeviceAuthorize({
-        account_name: accountName,
+        account_name: undefined,
         is_shared: 0,
         region: region || undefined,
       });
@@ -1697,6 +1903,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
 
     kiroBatchCancelRef.current = true;
+    kiroAwsIdcJsonCancelRef.current = true;
 
     setStep('platform');
     setPlatform('');
@@ -1709,7 +1916,15 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setKiroImportRefreshToken('');
     setKiroImportClientId('');
     setKiroImportClientSecret('');
-    setKiroImportAccountName('');
+    setKiroAwsIdcJsonText('');
+    setKiroAwsIdcJsonFieldMap({
+      refresh_token: '',
+      client_id: '',
+      client_secret: '',
+      region: '',
+    });
+    setKiroAwsIdcJsonResults([]);
+    setIsKiroAwsIdcJsonImporting(false);
     setKiroBatchJson('');
     setKiroBatchResults([]);
     setIsKiroBatchImporting(false);
@@ -1755,6 +1970,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
 
     kiroBatchCancelRef.current = true;
+    kiroAwsIdcJsonCancelRef.current = true;
 
     onOpenChange(false);
     // 延迟重置状态，等待动画完成
@@ -1776,6 +1992,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
             pollTimerRef.current = null;
           }
           kiroBatchCancelRef.current = true;
+          kiroAwsIdcJsonCancelRef.current = true;
           // 延迟重置状态
           setTimeout(resetState, 300);
         }
@@ -2071,7 +2288,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                   <div className="flex-1">
                     <h3 className="font-semibold">AWS-IMA（Builder ID / AWS IdC）</h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      手动导入（refresh_token + client）
+                      支持单个账户导入 / JSON 单个批量导入
                     </p>
                   </div>
                 </label>
@@ -2294,6 +2511,65 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     <h3 className="font-semibold">Refresh Token 导入</h3>
                     <p className="text-sm text-muted-foreground mt-1">
                       适合你已经能拿到 RefreshToken 的场景
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {/* 选择导入方式 (Kiro AWS-IMA / Builder ID) */}
+          {step === 'method' && platform === 'kiro' && kiroProvider === 'aws_idc' && (
+            <div className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                选择导入方式
+              </p>
+
+              <div className="space-y-3">
+                <label
+                  className={cn(
+                    "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                    kiroAwsIdcMethod === 'manual_import'
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="kiroAwsIdcMethod"
+                    value="manual_import"
+                    checked={kiroAwsIdcMethod === 'manual_import'}
+                    onChange={() => setKiroAwsIdcMethod('manual_import')}
+                    className="w-4 h-4 mt-1"
+                  />
+                  <div className="flex-1">
+                    <h3 className="font-semibold">单个账户导入</h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      填写 refresh_token + client_id + client_secret
+                    </p>
+                  </div>
+                </label>
+
+                <label
+                  className={cn(
+                    "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                    kiroAwsIdcMethod === 'json_import'
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="kiroAwsIdcMethod"
+                    value="json_import"
+                    checked={kiroAwsIdcMethod === 'json_import'}
+                    onChange={() => setKiroAwsIdcMethod('json_import')}
+                    className="w-4 h-4 mt-1"
+                  />
+                  <div className="flex-1">
+                    <h3 className="font-semibold">JSON 单个/批量导入</h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      一个输入框，支持字段映射；region 未传则走默认值
                     </p>
                   </div>
                 </label>
@@ -2816,17 +3092,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     </p>
                   </div>
 
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-aws-idc-device-account-name" className="text-base font-semibold">
-                      account_name
-                    </Label>
-                    <Input
-                      id="kiro-aws-idc-device-account-name"
-                      placeholder="例如：my-builder-id"
-                      value={kiroImportAccountName}
-                      onChange={(e) => setKiroImportAccountName(e.target.value)}
-                      className="h-12"
-                    />
+                  <div className="p-4 bg-muted/30 border border-border rounded-lg">
+                    <p className="text-xs text-muted-foreground">
+                      账号名称将自动使用邮箱（服务端校验通过后填充），无需手动填写。
+                    </p>
                   </div>
 
                   <div className="space-y-3">
@@ -2958,10 +3227,193 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     </div>
                   )}
                 </>
+              ) : platform === 'kiro' && kiroProvider === 'aws_idc' && kiroAwsIdcMethod === 'json_import' ? (
+                <>
+                  <div className="space-y-3">
+                    <Label className="text-base font-semibold">JSON 单个/批量导入</Label>
+                    <p className="text-sm text-muted-foreground">
+                      粘贴 JSON 全文（对象或数组）；支持字段映射；region 未传则走默认值。
+                    </p>
+                  </div>
+
+                  <div className="p-4 bg-muted/30 border border-border rounded-lg">
+                    <p className="text-xs text-muted-foreground">
+                      账号名称将自动使用邮箱（服务端校验通过后填充），无需手动填写。
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <Label className="text-base font-semibold">字段映射</Label>
+
+                    <div className="rounded-lg border overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/50">
+                          <tr>
+                            <th className="text-left p-3 font-medium">需要字段</th>
+                            <th className="text-left p-3 font-medium">你的 JSON 字段名</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          <tr>
+                            <td className="p-3 font-mono text-xs">refresh_token（必填）</td>
+                            <td className="p-3">
+                              <Input
+                                value={kiroAwsIdcJsonFieldMap.refresh_token}
+                                onChange={(e) =>
+                                  setKiroAwsIdcJsonFieldMap((prev) => ({
+                                    ...prev,
+                                    refresh_token: e.target.value,
+                                  }))
+                                }
+                                placeholder="例如 rt / refreshToken / refresh_token"
+                                className="h-10 font-mono text-xs"
+                                autoComplete="off"
+                              />
+                            </td>
+                          </tr>
+
+                          <tr>
+                            <td className="p-3 font-mono text-xs">client_id（必填）</td>
+                            <td className="p-3">
+                              <Input
+                                value={kiroAwsIdcJsonFieldMap.client_id}
+                                onChange={(e) =>
+                                  setKiroAwsIdcJsonFieldMap((prev) => ({
+                                    ...prev,
+                                    client_id: e.target.value,
+                                  }))
+                                }
+                                placeholder="例如 cid / clientId / client_id"
+                                className="h-10 font-mono text-xs"
+                                autoComplete="off"
+                              />
+                            </td>
+                          </tr>
+
+                          <tr>
+                            <td className="p-3 font-mono text-xs">client_secret（必填）</td>
+                            <td className="p-3">
+                              <Input
+                                value={kiroAwsIdcJsonFieldMap.client_secret}
+                                onChange={(e) =>
+                                  setKiroAwsIdcJsonFieldMap((prev) => ({
+                                    ...prev,
+                                    client_secret: e.target.value,
+                                  }))
+                                }
+                                placeholder="例如 csecret / clientSecret / client_secret"
+                                className="h-10 font-mono text-xs"
+                                autoComplete="off"
+                              />
+                            </td>
+                          </tr>
+
+                          <tr>
+                            <td className="p-3 font-mono text-xs">region（可选）</td>
+                            <td className="p-3">
+                              <Input
+                                value={kiroAwsIdcJsonFieldMap.region}
+                                onChange={(e) =>
+                                  setKiroAwsIdcJsonFieldMap((prev) => ({
+                                    ...prev,
+                                    region: e.target.value,
+                                  }))
+                                }
+                                placeholder="例如 region-id / region / awsRegion"
+                                className="h-10 font-mono text-xs"
+                                autoComplete="off"
+                              />
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground">
+                      留空则自动识别常见字段名；多个字段名可用英文逗号分隔。
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <Label htmlFor="kiro-aws-idc-region" className="text-base font-semibold">
+                      默认 region（默认 us-east-1）
+                    </Label>
+                    <Input
+                      id="kiro-aws-idc-region"
+                      placeholder="例如：us-east-1"
+                      value={kiroAwsIdcRegion}
+                      onChange={(e) => setKiroAwsIdcRegion(e.target.value)}
+                      className="h-12 font-mono text-sm"
+                      autoComplete="off"
+                    />
+                    <p className="text-sm text-muted-foreground">
+                      当 JSON 中没有 region（或字段映射为空）时，使用此默认值；留空则走服务端默认值。
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <Label htmlFor="kiro-aws-idc-json-text" className="text-base font-semibold">
+                      JSON 全文
+                    </Label>
+                    <Textarea
+                      id="kiro-aws-idc-json-text"
+                      placeholder='示例：[{"region-id":"us-east-1","cid":"xxx","csecret":"xxxx","rt":"xxxx"}]'
+                      value={kiroAwsIdcJsonText}
+                      onChange={(e) => setKiroAwsIdcJsonText(e.target.value)}
+                      className="font-mono text-sm [field-sizing:fixed] min-h-[180px] max-h-[360px] overflow-y-auto"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      支持单个对象 {} 或数组 []；也支持多个对象用逗号分隔（会自动补成数组）。
+                    </p>
+                  </div>
+
+                  {kiroAwsIdcJsonResults.length > 0 && (
+                    <div className="space-y-3">
+                      <Label className="text-base font-semibold">导入清单</Label>
+                      <div className="space-y-2">
+                        {kiroAwsIdcJsonResults.map((r) => (
+                          <div
+                            key={r.index}
+                            className="flex items-start justify-between gap-3 rounded-lg border p-3"
+                          >
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <p className="text-sm">
+                                <span className="font-mono text-xs text-muted-foreground mr-2">
+                                  #{r.index}
+                                </span>
+                                <span className={r.accountName ? '' : 'text-muted-foreground'}>
+                                  {r.accountName || '（未获取邮箱）'}
+                                </span>
+                              </p>
+                              {r.message && (
+                                <p className="text-xs text-muted-foreground break-words">{r.message}</p>
+                              )}
+                            </div>
+                            <Badge
+                              variant={
+                                r.status === 'success'
+                                  ? 'secondary'
+                                  : r.status === 'error'
+                                  ? 'destructive'
+                                  : 'outline'
+                              }
+                            >
+                              {r.status === 'success'
+                                ? '成功'
+                                : r.status === 'error'
+                                ? '失败'
+                                : '处理中'}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
               ) : platform === 'kiro' && kiroProvider === 'aws_idc' && kiroAwsIdcMethod === 'manual_import' ? (
                 <>
                   <div className="space-y-3">
-                    <Label className="text-base font-semibold">AWS-IMA（Builder ID）手动导入</Label>
+                    <Label className="text-base font-semibold">单个账户导入</Label>
                     <p className="text-sm text-muted-foreground">
                       提供 refresh_token + client_id + client_secret；服务端不会回传 token。
                     </p>
@@ -2986,17 +3438,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     </p>
                   </div>
 
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-aws-idc-import-account-name" className="text-base font-semibold">
-                      account_name（必填）
-                    </Label>
-                    <Input
-                      id="kiro-aws-idc-import-account-name"
-                      placeholder="例如：my-builder-id"
-                      value={kiroImportAccountName}
-                      onChange={(e) => setKiroImportAccountName(e.target.value)}
-                      className="h-12"
-                    />
+                  <div className="p-4 bg-muted/30 border border-border rounded-lg">
+                    <p className="text-xs text-muted-foreground">
+                      账号名称将自动使用邮箱（服务端校验通过后填充），无需手动填写。
+                    </p>
                   </div>
 
                   <div className="space-y-3">
@@ -3275,17 +3720,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     </p>
                   </div>
 
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-account-name" className="text-base font-semibold">
-                      账号名称（可选）
-                    </Label>
-                    <Input
-                      id="kiro-account-name"
-                      placeholder="给这个账号起个名字（可不填）"
-                      value={kiroImportAccountName}
-                      onChange={(e) => setKiroImportAccountName(e.target.value)}
-                      className="h-12"
-                    />
+                  <div className="p-4 bg-muted/30 border border-border rounded-lg">
+                    <p className="text-xs text-muted-foreground">
+                      账号名称将自动使用邮箱（服务端校验通过后填充），无需手动填写。
+                    </p>
                   </div>
 
                   <div className="space-y-3">
@@ -3531,7 +3969,6 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                   <StatefulButton
                     onClick={handleImportKiroAwsIdcAccount}
                     disabled={
-                      !kiroImportAccountName.trim() ||
                       !kiroImportRefreshToken.trim() ||
                       !kiroImportClientId.trim() ||
                       !kiroImportClientSecret.trim()
@@ -3539,6 +3976,14 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     className="flex-1 cursor-pointer"
                   >
                     完成导入
+                  </StatefulButton>
+                ) : kiroAwsIdcMethod === 'json_import' ? (
+                  <StatefulButton
+                    onClick={handleImportKiroAwsIdcJson}
+                    disabled={!kiroAwsIdcJsonText.trim() || isKiroAwsIdcJsonImporting}
+                    className="flex-1 cursor-pointer"
+                  >
+                    {isKiroAwsIdcJsonImporting ? '导入中...' : '解析并导入'}
                   </StatefulButton>
                 ) : kiroAwsIdcMethod === 'device_code' ? (
                   kiroAwsIdcStatus === 'completed' ? (

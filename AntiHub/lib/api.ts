@@ -1941,7 +1941,7 @@ export interface KiroAwsIdcDeviceAuthorizeResponse {
 }
 
 export async function kiroAwsIdcDeviceAuthorize(payload: {
-  account_name: string;
+  account_name?: string;
   is_shared?: number;
   region?: string;
 }): Promise<KiroAwsIdcDeviceAuthorizeResponse> {
@@ -1980,7 +1980,7 @@ export async function importKiroAwsIdcAccount(payload: {
   refreshToken: string;
   clientId: string;
   clientSecret: string;
-  accountName: string;
+  accountName?: string;
   isShared?: number;
   region?: string;
 }): Promise<KiroAccount> {

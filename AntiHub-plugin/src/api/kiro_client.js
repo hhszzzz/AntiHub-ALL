@@ -6,6 +6,43 @@ import kiroAccountService from '../services/kiro_account.service.js';
 import kiroConsumptionService from '../services/kiro_consumption.service.js';
 import kiroSubscriptionModelService from '../services/kiro_subscription_model.service.js';
 
+function parseNonNegativeInt(value, fallback) {
+  if (value === undefined || value === null) return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+// Kiro usage limits 同步策略：默认节流，避免每次请求都打 /getUsageLimits 导致 429
+const USAGE_LIMITS_SYNC_INTERVAL_SECONDS = parseNonNegativeInt(
+  process.env.KIRO_USAGE_LIMITS_SYNC_INTERVAL_SECONDS,
+  300
+);
+const USAGE_LIMITS_429_COOLDOWN_SECONDS = parseNonNegativeInt(
+  process.env.KIRO_USAGE_LIMITS_429_COOLDOWN_SECONDS,
+  300
+);
+
+const usageLimitsSyncStateByAccountId = new Map();
+
+function getUsageLimitsSyncState(accountId) {
+  const key = String(accountId || '');
+  if (!usageLimitsSyncStateByAccountId.has(key)) {
+    usageLimitsSyncStateByAccountId.set(key, {
+      inFlight: false,
+      lastSuccessAt: 0,
+      cooldownUntil: 0,
+    });
+  }
+  return usageLimitsSyncStateByAccountId.get(key);
+}
+
+function isHttp429Error(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  // kiro.service.js: reject(new Error(`HTTP ${statusCode}: ${body}`))
+  return message.includes('HTTP 429') || message.includes(' 429 ') || message.startsWith('429');
+}
+
 /**
  * Kiro API 客户端
  * 处理CodeWhisperer API调用和流式响应
@@ -480,6 +517,31 @@ class KiroClient {
     });
 
     // 2. 获取账号信息
+    const syncState = getUsageLimitsSyncState(contextInfo.account_id);
+    const now = Date.now();
+
+    // 默认节流：避免每条请求都同步上游 usage limits（上游经常会对 /getUsageLimits 限流 429）
+    if (syncState.inFlight) {
+      logger.debug(`[${requestId}] usage limits 同步进行中，跳过: account_id=${contextInfo.account_id}`);
+      return;
+    }
+
+    if (syncState.cooldownUntil && now < syncState.cooldownUntil) {
+      logger.debug(`[${requestId}] usage limits 处于 429 冷却期，跳过: account_id=${contextInfo.account_id}`);
+      return;
+    }
+
+    if (
+      USAGE_LIMITS_SYNC_INTERVAL_SECONDS > 0 &&
+      syncState.lastSuccessAt &&
+      now - syncState.lastSuccessAt < USAGE_LIMITS_SYNC_INTERVAL_SECONDS * 1000
+    ) {
+      logger.debug(
+        `[${requestId}] usage limits 距离上次成功同步未超过 ${USAGE_LIMITS_SYNC_INTERVAL_SECONDS}s，跳过: account_id=${contextInfo.account_id}`
+      );
+      return;
+    }
+
     const account = await kiroAccountService.getAccountById(contextInfo.account_id);
     if (!account) {
       logger.warn(`[${requestId}] 账号不存在，无法更新余额: account_id=${contextInfo.account_id}`);
@@ -487,6 +549,13 @@ class KiroClient {
     }
 
     // 3. 从上游获取最新的使用量信息
+    // 二次检查：避免 await 后出现并发同步
+    if (syncState.inFlight) {
+      logger.debug(`[${requestId}] usage limits 同步进行中，跳过: account_id=${contextInfo.account_id}`);
+      return;
+    }
+
+    syncState.inFlight = true;
     try {
       logger.info(`[${requestId}] 从上游获取最新余额信息: account_id=${contextInfo.account_id}`);
       
@@ -550,10 +619,21 @@ class KiroClient {
         bonus_details: usageLimitsData.bonus_details
       });
 
+      syncState.lastSuccessAt = Date.now();
+      syncState.cooldownUntil = 0;
       logger.info(`[${requestId}] 余额已更新: account_id=${contextInfo.account_id}, current_usage=${usageLimitsData.current_usage}`);
     } catch (error) {
-      logger.error(`[${requestId}] 更新余额失败:`, error.message);
+      if (isHttp429Error(error)) {
+        syncState.cooldownUntil = Date.now() + (USAGE_LIMITS_429_COOLDOWN_SECONDS * 1000);
+        logger.warn(
+          `[${requestId}] usage limits 同步遇到 429，进入冷却 ${USAGE_LIMITS_429_COOLDOWN_SECONDS}s: account_id=${contextInfo.account_id}`
+        );
+      } else {
+        logger.error(`[${requestId}] 更新余额失败:`, error.message);
+      }
       // 不抛出错误，因为消费日志已经记录成功
+    } finally {
+      syncState.inFlight = false;
     }
   }
 

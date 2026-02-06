@@ -45,6 +45,7 @@
 - 必配：你自己的密钥（`JWT_SECRET_KEY`、`PLUGIN_ADMIN_API_KEY`、`PLUGIN_API_ENCRYPTION_KEY`）
 - 可选：外部 PostgreSQL / Redis（如果你不想用 compose 自带的）
 - 可选：`KIRO_IDE_VERSION`（Kiro 请求 User-Agent 版本；默认内置 `0.9.2`）
+- 可选：`KIRO_USAGE_LIMITS_SYNC_INTERVAL_SECONDS` / `KIRO_USAGE_LIMITS_429_COOLDOWN_SECONDS`（Kiro 剩余额度同步节流；默认 300s，避免频繁调用 `/getUsageLimits` 触发 429）
 
 ## 一键部署
 

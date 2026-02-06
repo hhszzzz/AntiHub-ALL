@@ -355,6 +355,12 @@ router.post('/api/kiro/accounts', authenticateApiKey, async (req, res) => {
 
     // 合并使用量数据（请求中的值优先，如果没有则使用API获取的值）
     const finalEmail = email || usageLimitsData.email;
+    const finalAccountName =
+      (typeof finalEmail === 'string' && finalEmail.trim())
+        ? finalEmail.trim()
+        : (typeof account_name === 'string' && account_name.trim())
+          ? account_name.trim()
+          : 'Kiro Account';
     let finalUserid = userid || usageLimitsData.userid;
     if (!finalUserid && typeof tokenData.profile_arn === 'string') {
       const extracted = tokenData.profile_arn.split('/').pop();
@@ -375,7 +381,7 @@ router.post('/api/kiro/accounts', authenticateApiKey, async (req, res) => {
     // 创建账号
     const account = await kiroAccountService.createAccount({
       user_id: req.user.user_id,
-      account_name,
+      account_name: finalAccountName,
       auth_method,
       refresh_token,
       access_token: tokenData.access_token,
