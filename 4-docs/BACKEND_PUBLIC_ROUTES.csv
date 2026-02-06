@@ -99,6 +99,7 @@ POST /v1/images/generations,图片生成（OpenAI 兼容）,"后端:v1.image_gen
 POST /v1/messages,创建消息,后端:anthropic.create_message；主要调用:Anthropic Messages -> OpenAI 转换；antigravity_service/kiro_service/qwen 分流；支持SSE；/cc 端点会缓冲SSE写usage；对接:兼容API/外部SDK
 POST /v1/messages/count_tokens,计算Token数量,后端:anthropic.count_tokens；主要调用:-；对接:兼容API/外部SDK
 POST /v1/responses,Responses API（兼容）,后端:v1.responses；主要调用:Responses->ChatCompletions 兼容转换；codex_service/kiro_service/antigravity_service 分流；UsageLogService 记录；对接:兼容API/外部SDK
+POST /v1/responses/compact,Responses Compact API（兼容）,后端:v1.responses_compact；主要调用:codex_service.execute_codex_responses_compact；UsageLogService 记录；对接:兼容API/外部SDK
 POST /v1beta/models/{model}:generateContent,Gemini v1beta generateContent,后端:gemini.generate_content；主要调用:gemini-cli 文本代理 或 本地ZAI图片生成；UsageLogService 记录；对接:兼容API/外部SDK
 POST /v1beta/models/{model}:streamGenerateContent,Gemini v1beta streamGenerateContent,后端:gemini.stream_generate_content；主要调用:gemini-cli 流式代理 或 本地ZAI图片流；UsageLogService 记录；对接:兼容API/外部SDK
 PUT /api/codex/accounts/{account_id}/limits,手动更新 Codex 账号限额（5小时/周限）,后端:codex.update_codex_account_limits；主要调用:service.update_account_limits；对接:前端/管理后台

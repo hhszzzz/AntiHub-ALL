@@ -78,10 +78,10 @@ const KIRO_REDIRECT_URI = 'kiro://kiro.kiroAgent/authenticate-success';
  * Kiro 模型映射
  */
 const KIRO_MODEL_MAP = {
-  'claude-sonnet-4-5': 'claude-sonnet-4.5',
   'claude-sonnet-4-5-20250929': 'claude-sonnet-4.5',
   'claude-sonnet-4-20250514': 'claude-sonnet-4',
   'claude-opus-4-5-20251101': 'claude-opus-4.5',
+  'claude-opus-4-6-20260205': 'claude-opus-4-6',
   'claude-haiku-4-5-20251001': 'claude-haiku-4.5'
 };
 
@@ -98,7 +98,8 @@ const KIRO_DEFAULTS = {
 /**
  * Kiro IDE版本
  */
-const KIRO_IDE_VERSION = '0.6.18';
+const DEFAULT_KIRO_IDE_VERSION = '0.9.2';
+const KIRO_IDE_VERSION = (process.env.KIRO_IDE_VERSION || '').trim() || DEFAULT_KIRO_IDE_VERSION;
 
 class KiroService {
   constructor() {

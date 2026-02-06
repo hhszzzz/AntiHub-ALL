@@ -956,6 +956,16 @@ export async function getAPIKeyInfo(): Promise<PluginAPIKey | null> {
 }
 
 /**
+ * 获取指定 API Key 详情（包含完整 key）
+ */
+export async function getAPIKey(keyId: number): Promise<CreateAPIKeyResponse> {
+  return fetchWithAuth<CreateAPIKeyResponse>(
+    `${API_BASE_URL}/api/api-keys/${keyId}`,
+    { method: 'GET' }
+  );
+}
+
+/**
  * 生成新的 API Key
  */
 export async function generateAPIKey(
@@ -1931,7 +1941,7 @@ export interface KiroAwsIdcDeviceAuthorizeResponse {
 }
 
 export async function kiroAwsIdcDeviceAuthorize(payload: {
-  account_name: string;
+  account_name?: string;
   is_shared?: number;
   region?: string;
 }): Promise<KiroAwsIdcDeviceAuthorizeResponse> {
@@ -1970,19 +1980,26 @@ export async function importKiroAwsIdcAccount(payload: {
   refreshToken: string;
   clientId: string;
   clientSecret: string;
-  accountName: string;
+  userId?: string;
+  accountName?: string;
   isShared?: number;
   region?: string;
 }): Promise<KiroAccount> {
+  const jsonFiles: Array<Record<string, any>> = [
+    { refreshToken: payload.refreshToken },
+    { clientId: payload.clientId, clientSecret: payload.clientSecret },
+  ];
+
+  if (typeof payload.userId === 'string' && payload.userId.trim()) {
+    jsonFiles.push({ user_id: payload.userId.trim() });
+  }
+
   const result = await fetchWithAuth<{ success: boolean; data: KiroAccount }>(
     `${API_BASE_URL}/api/kiro/aws-idc/import`,
     {
       method: 'POST',
       body: JSON.stringify({
-        json_files: [
-          { refreshToken: payload.refreshToken },
-          { clientId: payload.clientId, clientSecret: payload.clientSecret },
-        ],
+        json_files: jsonFiles,
         account_name: payload.accountName,
         is_shared: payload.isShared ?? 0,
         region: payload.region,
@@ -2401,11 +2418,13 @@ export interface CodexFallbackConfig {
   base_url: string | null;
   has_key: boolean;
   api_key_masked?: string | null;
+  api_key?: string | null;
 }
 
-export async function getCodexFallbackConfig(): Promise<CodexFallbackConfig> {
+export async function getCodexFallbackConfig(options: { reveal_key?: boolean } = {}): Promise<CodexFallbackConfig> {
+  const query = options.reveal_key ? '?reveal_key=true' : '';
   const result = await fetchWithAuth<{ success: boolean; data: CodexFallbackConfig }>(
-    `${API_BASE_URL}/api/codex/fallback`,
+    `${API_BASE_URL}/api/codex/fallback${query}`,
     { method: 'GET' }
   );
   return result.data;

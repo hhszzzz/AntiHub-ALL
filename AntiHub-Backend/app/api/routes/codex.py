@@ -61,11 +61,12 @@ async def list_codex_models(service: CodexService = Depends(get_codex_service)):
 
 @router.get("/fallback", summary="获取 CodexCLI 兜底服务配置")
 async def get_codex_fallback_config(
+    reveal_key: bool = False,
     current_user: User = Depends(get_current_user),
     service: CodexService = Depends(get_codex_service),
 ):
     try:
-        return await service.get_fallback_config(user_id=current_user.id)
+        return await service.get_fallback_config(user_id=current_user.id, reveal_key=reveal_key)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
