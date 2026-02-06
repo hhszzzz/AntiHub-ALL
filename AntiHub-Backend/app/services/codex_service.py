@@ -71,6 +71,7 @@ CODEX_MODEL_ALIASES = {
 
 CODEX_API_BASE_URL = (os.getenv("CODEX_API_BASE_URL") or "https://chatgpt.com/backend-api/codex").rstrip("/")
 CODEX_RESPONSES_URL = f"{CODEX_API_BASE_URL}/responses"
+OPENAI_PLATFORM_RESPONSES_COMPACT_URL = "https://api.openai.com/v1/responses/compact"
 _CODEX_BASE_FOR_WHAM = CODEX_API_BASE_URL.rstrip("/")
 if _CODEX_BASE_FOR_WHAM.endswith("/codex"):
     _CODEX_BASE_FOR_WHAM = _CODEX_BASE_FOR_WHAM[: -len("/codex")]
@@ -847,6 +848,22 @@ def _build_wham_usage_headers(
     return headers
 
 
+def _build_openai_platform_json_headers(
+    *,
+    access_token: str,
+    user_agent: Optional[str],
+) -> Dict[str, str]:
+    ua = (user_agent or "").strip() or CODEX_DEFAULT_USER_AGENT
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "OpenAI-Beta": CODEX_OPENAI_BETA,
+        "User-Agent": ua,
+        "Originator": "codex_cli_rs",
+    }
+
+
 class CodexService:
     def __init__(self, db: AsyncSession, redis: RedisClient):
         self.db = db
@@ -1334,6 +1351,87 @@ class CodexService:
             )(),
         )
 
+    async def _execute_fallback_responses_compact(
+        self,
+        *,
+        user_id: int,
+        request_data: Dict[str, Any],
+        user_agent: Optional[str],
+        reason: str,
+    ) -> Optional[Any]:
+        cfg = await self.fallback_repo.get_by_user_id(user_id)
+        if not cfg or not getattr(cfg, "is_active", True):
+            return None
+
+        base_url = _normalize_fallback_base_url(cfg.base_url)
+        try:
+            api_key = decrypt_secret(cfg.api_key)
+        except Exception:
+            api_key = ""
+        if not (api_key or "").strip():
+            return None
+
+        url = _join_base_url(base_url, "/responses/compact")
+        body: Dict[str, Any] = dict(request_data or {})
+        if "model" in body:
+            resolved = _resolve_codex_model_name(body.get("model"))
+            if resolved:
+                body["model"] = resolved
+
+        ua = (user_agent or "").strip() or CODEX_DEFAULT_USER_AGENT
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "OpenAI-Beta": CODEX_OPENAI_BETA,
+            "User-Agent": ua,
+        }
+
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+        client = _build_httpx_async_client(timeout=timeout, follow_redirects=True)
+        resp: Optional[httpx.Response] = None
+        try:
+            resp = await client.post(url, json=body, headers=headers)
+            if 200 <= resp.status_code < 300:
+                logger.warning(
+                    "codex fallback enabled: user_id=%s base_url=%s reason=%s",
+                    user_id,
+                    base_url,
+                    (reason or "")[:200],
+                )
+                try:
+                    return resp.json()
+                except Exception as e:
+                    raise ValueError("Codex fallback /responses/compact 响应不是 JSON") from e
+
+            raw_err = await resp.aread()
+            headers_copy = resp.headers
+            status_code = resp.status_code
+            try:
+                err_text = raw_err.decode("utf-8", errors="replace")
+            except Exception:
+                err_text = str(raw_err)
+
+            raise httpx.HTTPStatusError(
+                f"Codex fallback upstream error: HTTP {status_code}",
+                request=None,
+                response=type(
+                    "R",
+                    (),
+                    {"status_code": status_code, "text": err_text, "headers": headers_copy},
+                )(),
+            )
+        finally:
+            if resp is not None:
+                try:
+                    await resp.aclose()
+                except Exception:
+                    pass
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
     async def open_codex_responses_stream(
         self,
         user_id: int,
@@ -1503,6 +1601,149 @@ class CodexService:
         if not response_obj:
             raise ValueError("Codex 上游未返回 response.completed")
         return response_obj, account
+
+    async def execute_codex_responses_compact(
+        self,
+        user_id: int,
+        request_data: Dict[str, Any],
+        *,
+        user_agent: Optional[str] = None,
+    ) -> Tuple[Any, Any]:
+        """
+        `POST /v1/responses/compact`（Codex 渠道）：
+        - 通过 OpenAI Platform 的 `/v1/responses/compact` 执行压缩（compact），返回其 JSON。
+        - 账号选择/冻结/限额切换逻辑与 `/responses` 主链路保持一致。
+        """
+        if not isinstance(request_data, dict):
+            raise ValueError("request_data 必须是 JSON object")
+
+        exclude_ids: Set[int] = set()
+        last_error: Optional[str] = None
+
+        while True:
+            selected = await self._select_active_account_obj(user_id, exclude_ids=exclude_ids)
+            if selected is None:
+                fallback_obj = await self._execute_fallback_responses_compact(
+                    user_id=user_id,
+                    request_data=request_data,
+                    user_agent=user_agent,
+                    reason=last_error or "no_available_codex_account",
+                )
+                if fallback_obj is not None:
+                    return fallback_obj, None
+                raise ValueError(last_error or "没有可用的 Codex 账号")
+
+            exclude_ids.add(int(getattr(selected, "id", 0) or 0))
+
+            body: Dict[str, Any] = dict(request_data or {})
+            if "model" in body:
+                resolved = _resolve_codex_model_name(body.get("model"))
+                if resolved:
+                    body["model"] = resolved
+
+            creds = self._load_account_credentials(selected)
+            creds = await self._ensure_account_tokens(selected, creds)
+
+            access_token = _safe_str(creds.get("access_token"))
+            if not access_token:
+                last_error = "账号缺少 access_token"
+                await self._disable_account(selected, reason="missing_access_token")
+                continue
+
+            chatgpt_account_id = self._resolve_chatgpt_account_id(selected, creds)
+            if not chatgpt_account_id:
+                last_error = "账号缺少 ChatGPT account_id（无法同步限额窗口）"
+                await self._disable_account(selected, reason="missing_account_id")
+                continue
+
+            headers = _build_openai_platform_json_headers(access_token=access_token, user_agent=user_agent)
+
+            timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+            client = _build_httpx_async_client(timeout=timeout, follow_redirects=True)
+            resp: Optional[httpx.Response] = None
+            try:
+                resp = await client.post(OPENAI_PLATFORM_RESPONSES_COMPACT_URL, json=body, headers=headers)
+            except Exception:
+                await client.aclose()
+                raise
+
+            if 200 <= resp.status_code < 300:
+                try:
+                    obj = resp.json()
+                except Exception as e:
+                    await resp.aclose()
+                    await client.aclose()
+                    raise ValueError("Codex compact 响应不是 JSON") from e
+
+                await self._update_account_after_success(selected, resp.headers)
+                await resp.aclose()
+                await client.aclose()
+                return obj, selected
+
+            now = _now_utc()
+            retry_at = _parse_retry_after(resp.headers, now=now)
+            raw_err = await resp.aread()
+            err_headers = resp.headers
+            status_code = resp.status_code
+            await resp.aclose()
+            await client.aclose()
+
+            err_text = ""
+            try:
+                err_text = raw_err.decode("utf-8", errors="replace")
+            except Exception:
+                err_text = str(raw_err)
+
+            if status_code == 429:
+                await self._update_account_after_success(selected, err_headers)
+
+                if not getattr(selected, "is_frozen", False) and retry_at is None:
+                    await self._sync_limits_from_wham_usage_best_effort(
+                        selected,
+                        creds,
+                        access_token=access_token,
+                        chatgpt_account_id=chatgpt_account_id,
+                    )
+
+                if not getattr(selected, "is_frozen", False):
+                    bucket = _infer_limit_bucket(err_text)
+                    await self._mark_rate_limited(selected, bucket=bucket, retry_at=retry_at, raw_error=err_text)
+                last_error = "账号触发限额，已自动切换下一个账号"
+                continue
+
+            if status_code == 401:
+                refreshed = await self._try_refresh_account(selected, creds)
+                if refreshed:
+                    last_error = "token 已刷新，重试该账号"
+                    exclude_ids.discard(int(getattr(selected, "id", 0) or 0))
+                    continue
+                await self._freeze_account(selected, reason="unauthorized")
+                last_error = "账号未授权（已冻结），已自动切换下一个账号"
+                continue
+
+            if status_code == 402:
+                code = _extract_error_detail_code(err_text)
+                await self._freeze_account(selected, reason=f"upstream_402:{code or 'unknown'}")
+                last_error = (
+                    f"账号触发组织/Workspace 限制（HTTP 402{('/' + code) if code else ''}，已冻结），已自动切换下一个账号"
+                )
+                continue
+
+            if status_code == 403:
+                code = _extract_error_detail_code(err_text)
+                await self._freeze_account(selected, reason=f"upstream_403:{code or 'unknown'}")
+                last_error = f"账号无权限（HTTP 403{('/' + code) if code else ''}，已冻结），已自动切换下一个账号"
+                continue
+
+            raise httpx.HTTPStatusError(
+                f"Codex compact 上游错误: HTTP {status_code}",
+                request=None,
+                response=type(
+                    "R",
+                    (),
+                    {"status_code": status_code, "text": err_text, "headers": err_headers},
+                )(),
+            )
 
     async def record_account_consumed_tokens(
         self,

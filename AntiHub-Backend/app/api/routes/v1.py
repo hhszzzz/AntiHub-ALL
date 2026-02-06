@@ -925,6 +925,197 @@ async def responses(
 
 
 @router.post(
+    "/responses/compact",
+    summary="Responses Compact API（兼容）",
+    description="兼容 OpenAI `/v1/responses/compact`（当前仅放行 config_type=codex；其它渠道统一 403）。",
+)
+async def responses_compact(
+    raw_request: Request,
+    current_user: User = Depends(get_user_flexible),
+    codex_service: CodexService = Depends(get_codex_service),
+):
+    start_time = time.monotonic()
+    endpoint = raw_request.url.path
+    method = raw_request.method
+    api_key_id = getattr(current_user, "_api_key_id", None)
+
+    try:
+        request_json = await raw_request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON request body")
+
+    if not isinstance(request_json, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Request body must be a JSON object")
+
+    model_name = request_json.get("model")
+
+    config_type = getattr(current_user, "_config_type", None)
+    if config_type is None:
+        api_type = raw_request.headers.get("X-Api-Type")
+        if api_type in ["kiro", "antigravity", "qwen", "codex"]:
+            config_type = api_type
+
+    effective_config_type = config_type or "antigravity"
+
+    try:
+        ensure_spec_allowed("OAIResponses", effective_config_type)
+
+        request_body = dict(request_json)
+        # /responses/compact 通常为非流式 JSON；提前去掉 stream，避免上游 400
+        request_body.pop("stream", None)
+
+        resp_obj, account = await codex_service.execute_codex_responses_compact(
+            user_id=current_user.id,
+            request_data=request_body,
+            user_agent=raw_request.headers.get("User-Agent"),
+        )
+
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        in_tok = out_tok = total_tok = cached_tok = 0
+        try:
+            if isinstance(resp_obj, dict):
+                in_tok, out_tok, total_tok, cached_tok = extract_openai_usage_details(resp_obj)
+        except Exception:
+            in_tok = out_tok = total_tok = cached_tok = 0
+
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type="codex",
+            stream=False,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            total_tokens=total_tok,
+            success=True,
+            status_code=200,
+            duration_ms=duration_ms,
+        )
+
+        if any([in_tok, out_tok, total_tok, cached_tok]):
+            account_id = int(getattr(account, "id", 0) or 0)
+            if account_id:
+                uncached_input = max(in_tok - cached_tok, 0)
+                await codex_service.record_account_consumed_tokens(
+                    user_id=current_user.id,
+                    account_id=account_id,
+                    input_tokens=uncached_input,
+                    output_tokens=out_tok,
+                    cached_tokens=cached_tok,
+                    total_tokens=total_tok,
+                )
+
+        return JSONResponse(content=resp_obj)
+
+    except HTTPException as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=e.status_code,
+            error_message=str(e.detail) if hasattr(e, "detail") else str(e),
+            duration_ms=duration_ms,
+        )
+        raise
+    except UpstreamAPIError as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=e.status_code,
+            error_message=e.extracted_message,
+            duration_ms=duration_ms,
+        )
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"error": e.extracted_message, "type": "api_error"},
+        )
+    except httpx.HTTPStatusError as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        upstream_response = getattr(e, "response_data", None)
+        if upstream_response is None:
+            try:
+                upstream_response = e.response.json()
+            except Exception:
+                upstream_response = {"error": e.response.text}
+
+        error_message = None
+        if isinstance(upstream_response, dict):
+            error_message = (
+                upstream_response.get("detail")
+                or upstream_response.get("error")
+                or upstream_response.get("message")
+                or str(upstream_response)
+            )
+        else:
+            error_message = str(upstream_response)
+
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=e.response.status_code,
+            error_message=error_message,
+            duration_ms=duration_ms,
+        )
+        return JSONResponse(status_code=e.response.status_code, content=upstream_response)
+    except ValueError as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_message=str(e),
+            duration_ms=duration_ms,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error_message=str(e),
+            duration_ms=duration_ms,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Responses Compact失败: {str(e)}",
+        )
+
+
+@router.post(
     "/chat/completions",
     summary="聊天补全",
     description="使用plug-in-api进行聊天补全（OpenAI兼容）。根据API key的config_type自动选择Antigravity / Kiro / Qwen配置"
