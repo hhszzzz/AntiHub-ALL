@@ -49,7 +49,22 @@
 
 ## 一键部署
 
-Linux运行`deploy.sh`即可（会先启动 `postgres/redis`，同步/初始化两个数据库，再启动主服务；默认 plugin 复用 PostgreSQL 超管账号）
+Linux 运行 `deploy.sh` 即可（会先启动 `postgres/redis`，同步/初始化两个数据库，再启动主服务；默认 plugin 复用 PostgreSQL 超管账号）。
+
+脚本支持交互菜单：
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+也支持直接指定命令（方便写到教程/自动化脚本里）：
+
+```bash
+./deploy.sh deploy     # 1) 一键部署（首次部署/重装）
+./deploy.sh upgrade    # 2) 升级（仅升级 web/backend/plugin，不操作数据库）
+./deploy.sh uninstall  # 3) 卸载（停止并删除容器，可选删除数据卷）
+```
 
 如需手动同步（复用旧数据卷但重写了 `.env` 密码时很有用）：
 

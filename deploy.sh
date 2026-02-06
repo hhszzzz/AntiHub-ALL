@@ -4,6 +4,10 @@
 
 set -e
 
+# 确保从脚本所在目录运行（避免在其它目录执行导致找不到 compose/.env）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -163,9 +167,6 @@ get_env_value() {
 fix_permissions() {
     log_info "修复 docker 目录权限..."
 
-    # 获取脚本所在目录（即项目根目录）
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
     # 仅处理 docker 目录，避免误改 .env / 仓库其它文件权限
     TARGET_DIR="$SCRIPT_DIR/docker"
     if [ ! -d "$TARGET_DIR" ]; then
@@ -185,20 +186,16 @@ fix_permissions() {
     log_info "docker 目录权限修复完成"
 }
 
-# 主函数
-main() {
-    log_info "开始部署 AntiHub-ALL..."
-    echo ""
+# 初始化 compose 环境（供部署/升级/卸载共用）
+prepare_compose() {
+    if [ ! -f docker-compose.yml ]; then
+        log_error "未找到 docker-compose.yml，请在项目根目录运行此脚本"
+        exit 1
+    fi
 
-    # 0. 修复权限（解决 NAS 等环境下的权限问题）
-    fix_permissions
-
-    # 1. 检查依赖
+    # 检查依赖
     log_info "检查系统依赖..."
     check_command docker
-    if ! command -v openssl &> /dev/null; then
-        log_warn "openssl 未安装，将用 Docker 生成随机密钥（可能会额外拉取 python:3.11-alpine 镜像）"
-    fi
 
     # 检测 docker compose 命令（优先使用新版本）
     if docker compose version &> /dev/null; then
@@ -226,6 +223,21 @@ main() {
     if ! docker info &> /dev/null; then
         log_error "Docker 未运行，请先启动 Docker 服务"
         exit 1
+    fi
+}
+
+# 部署（首次部署 / 重装）
+deploy() {
+    log_info "开始部署 AntiHub-ALL..."
+    echo ""
+
+    # 0. 修复权限（解决 NAS 等环境下的权限问题）
+    fix_permissions
+
+    # 1. 初始化 compose 环境
+    prepare_compose
+    if ! command -v openssl &> /dev/null; then
+        log_warn "openssl 未安装，将用 Docker 生成随机密钥（可能会额外拉取 python:3.11-alpine 镜像）"
     fi
 
     # 2. 检查 .env 文件
@@ -462,5 +474,133 @@ EOSQL
     echo ""
 }
 
-# 执行主函数
-main
+upgrade() {
+    log_info "开始升级 AntiHub-ALL（仅升级 web/backend/plugin，不操作数据库）..."
+    echo ""
+
+    fix_permissions
+    prepare_compose
+
+    if [ ! -f .env ]; then
+        log_warn "未找到 .env，当前目录似乎还未部署，将进入一键部署流程"
+        deploy
+        return 0
+    fi
+
+    # 备份 .env，避免误改或回滚困难
+    ENV_BACKUP_FILE=".env.bak.upgrade.$(date +\"%Y%m%d_%H%M%S\")"
+    cp .env "$ENV_BACKUP_FILE"
+    log_info "已备份 .env 到 ${ENV_BACKUP_FILE}"
+
+    log_info "拉取最新 Docker 镜像（仅 web/backend/plugin）..."
+    compose pull web backend plugin
+
+    log_info "重启服务（仅 web/backend/plugin），不重启 postgres/redis..."
+    compose up -d --no-deps web backend plugin
+
+    log_info "检查服务状态..."
+    sleep 3
+
+    FAILED_SERVICES=$(compose ps --services --filter "status=exited" | grep -E "^(web|backend|plugin)$" || true)
+    if [ -n "$FAILED_SERVICES" ]; then
+        log_error "以下服务启动失败（web/backend/plugin）："
+        echo "$FAILED_SERVICES"
+        log_info "查看日志："
+        compose logs --tail=80
+        exit 1
+    fi
+
+    DB_SERVICES_EXITED=$(compose ps --services --filter "status=exited" | grep -E "^(postgres|redis)$" || true)
+    if [ -n "$DB_SERVICES_EXITED" ]; then
+        log_warn "检测到数据库/缓存服务未运行（本次升级不会操作它们）："
+        echo "$DB_SERVICES_EXITED"
+    fi
+
+    log_info "升级完成（数据库未被重启/重建）！"
+    echo "  查看状态: $DOCKER_COMPOSE $COMPOSE_FILES ps"
+    echo "  查看日志: $DOCKER_COMPOSE $COMPOSE_FILES logs -f"
+    echo ""
+}
+
+uninstall() {
+    log_warn "即将卸载 AntiHub-ALL"
+    echo ""
+
+    prepare_compose
+
+    log_warn "卸载将停止并删除容器/网络；可选删除数据卷（会清空数据库数据）"
+    read -p "是否同时删除数据卷（数据库/缓存）？(y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        log_warn "删除数据卷中（不可恢复）..."
+        compose down -v --remove-orphans 2>/dev/null || true
+    else
+        log_info "保留数据卷..."
+        compose down --remove-orphans 2>/dev/null || true
+    fi
+
+    if [ -f .env ]; then
+        read -p "是否删除本地 .env 配置文件？(y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            rm -f .env
+            log_info ".env 已删除"
+        else
+            log_info "保留 .env"
+        fi
+    fi
+
+    log_info "卸载完成"
+    echo ""
+}
+
+show_menu() {
+    echo ""
+    log_info "请选择要执行的操作："
+    echo "  1) 一键部署（首次部署/重装）"
+    echo "  2) 升级（仅升级 web/backend/plugin，不操作数据库）"
+    echo "  3) 卸载（停止并删除容器，可选删除数据卷）"
+    echo "  0) 退出"
+    echo ""
+
+    while true; do
+        read -p "请输入序号 [0-3]: " choice
+        choice=${choice//$'\r'/}
+        case "$choice" in
+            1) deploy; break ;;
+            2) upgrade; break ;;
+            3) uninstall; break ;;
+            0) log_info "已退出"; exit 0 ;;
+            *) log_warn "无效选择，请输入 0/1/2/3" ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    1|deploy|install)
+        deploy
+        ;;
+    2|upgrade|update)
+        upgrade
+        ;;
+    3|uninstall|remove)
+        uninstall
+        ;;
+    -h|--help|help)
+        echo "Usage: ./deploy.sh [deploy|upgrade|uninstall]"
+        echo "  deploy     一键部署（首次部署/重装）"
+        echo "  upgrade    升级（仅升级 web/backend/plugin，不操作数据库）"
+        echo "  uninstall  卸载（停止并删除容器，可选删除数据卷）"
+        echo ""
+        echo "不传参数会进入交互菜单。"
+        ;;
+    "")
+        show_menu
+        ;;
+    *)
+        log_warn "未知参数: $1"
+        echo "可用参数: deploy | upgrade | uninstall | --help"
+        echo "或直接运行进入交互菜单。"
+        exit 1
+        ;;
+esac
