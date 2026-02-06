@@ -65,7 +65,7 @@ SUPPORTED_MODELS = [
 
 CODEX_MODEL_ALIASES = {
     # Common client aliases (e.g. CLIProxyAPI example config)
-    "codex-latest": "gpt-5-codex",
+    "codex-latest": "gpt-5.3-codex",
     "codex-mini": "gpt-5-codex-mini",
 }
 
