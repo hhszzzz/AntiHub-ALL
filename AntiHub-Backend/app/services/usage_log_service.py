@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 MAX_ERROR_MESSAGE_LENGTH = 2000
 MAX_LOGS_PER_CHANNEL = 200
+MAX_REQUEST_BODY_LENGTH = 65536  # 64KB，防止请求体过大
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -42,6 +43,19 @@ def _truncate_message(message: Optional[str]) -> Optional[str]:
     if len(msg) <= MAX_ERROR_MESSAGE_LENGTH:
         return msg
     return msg[:MAX_ERROR_MESSAGE_LENGTH] + "…"
+
+
+def _truncate_request_body(body: Any) -> Optional[str]:
+    """将请求体转换为JSON字符串并截断"""
+    if body is None:
+        return None
+    try:
+        json_str = json.dumps(body, ensure_ascii=False, default=str)
+        if len(json_str) <= MAX_REQUEST_BODY_LENGTH:
+            return json_str
+        return json_str[:MAX_REQUEST_BODY_LENGTH] + "…"
+    except Exception:
+        return None
 
 
 def _config_type_filter(config_type: Optional[str]):
@@ -261,6 +275,7 @@ class UsageLogService:
         duration_ms: int = 0,
         tts_voice_id: Optional[str] = None,
         tts_account_id: Optional[str] = None,
+        request_body: Any = None,
     ) -> None:
         """
         写 usage_log（失败也写），写入失败不影响主流程。
@@ -286,6 +301,7 @@ class UsageLogService:
                     duration_ms=duration_ms,
                     tts_voice_id=tts_voice_id,
                     tts_account_id=tts_account_id,
+                    request_body=_truncate_request_body(request_body),
                 )
                 db.add(log)
 

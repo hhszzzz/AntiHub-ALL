@@ -460,3 +460,43 @@ async def get_request_usage_stats(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="获取请求用量统计失败",
         )
+
+
+@router.get(
+    "/requests/logs/{log_id}/request-body",
+    summary="获取单条日志的请求体",
+    description="获取指定日志的原始请求体JSON，用于调试。需要验证日志归属当前用户。",
+)
+async def get_request_body(
+    log_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    获取单条日志的请求体
+    返回原始请求体JSON（如果有）
+    """
+    try:
+        repo = UsageLogRepository(db)
+        log = await repo.get_log_by_id(log_id=log_id, user_id=current_user.id)
+
+        if log is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="日志不存在或无权访问"
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "id": log.id,
+                "request_body": log.request_body,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取请求体失败",
+        )

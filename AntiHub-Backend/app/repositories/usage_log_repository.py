@@ -42,6 +42,17 @@ class UsageLogRepository:
             stmt = stmt.where(UsageLog.model_name == model_name)
         return stmt
 
+    async def get_log_by_id(
+        self,
+        *,
+        log_id: int,
+        user_id: int,
+    ) -> Optional[UsageLog]:
+        """根据ID获取单条日志（验证用户归属）"""
+        stmt = select(UsageLog).where(UsageLog.id == log_id, UsageLog.user_id == user_id)
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_logs(
         self,
         *,

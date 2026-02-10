@@ -1204,6 +1204,22 @@ export async function getRequestUsageLogs(params?: {
   return result.data;
 }
 
+/**
+ * 获取单条日志的请求体
+ */
+export interface RequestBodyResponse {
+  id: number;
+  request_body: string | null;
+}
+
+export async function getRequestLogBody(logId: number): Promise<RequestBodyResponse> {
+  const result = await fetchWithAuth<{ success: boolean; data: RequestBodyResponse }>(
+    `${API_BASE_URL}/api/usage/requests/logs/${logId}/request-body`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
 // ==================== 聊天相关 API ====================
 
 export type ApiType = 'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image';

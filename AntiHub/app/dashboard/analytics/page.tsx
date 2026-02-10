@@ -9,6 +9,7 @@ import {
   getKiroAccountConsumption,
   getRequestUsageStats,
   getRequestUsageLogs,
+  getRequestLogBody,
   getUiDefaultChannels,
   type UserQuotaItem,
   type QuotaConsumption,
@@ -20,7 +21,18 @@ import {
 } from '@/lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+  DrawerTrigger,
+} from '@/components/ui/drawer';
 import {
   Table,
   TableBody,
@@ -65,6 +77,11 @@ export default function AnalyticsPage() {
   const [totalRecords, setTotalRecords] = useState(0);
   const [antigravityTotalRecords, setAntigravityTotalRecords] = useState(0); // Antigravity 总记录数
   const [requestTotalRecords, setRequestTotalRecords] = useState(0);
+  // 请求体查看状态
+  const [selectedLogId, setSelectedLogId] = useState<number | null>(null);
+  const [requestBody, setRequestBody] = useState<string | null>(null);
+  const [isLoadingBody, setIsLoadingBody] = useState(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image'>('antigravity');
   const [isTabInitialized, setIsTabInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -195,6 +212,39 @@ export default function AnalyticsPage() {
 
   const handleRequestPageChange = (page: number) => {
     setRequestCurrentPage(page);
+  };
+
+  // 查看请求体
+  const handleViewRequestBody = async (logId: number) => {
+    setSelectedLogId(logId);
+    setIsDrawerOpen(true);
+    setIsLoadingBody(true);
+    setRequestBody(null);
+
+    try {
+      const result = await getRequestLogBody(logId);
+      if (result.request_body) {
+        // 尝试格式化 JSON
+        try {
+          const parsed = JSON.parse(result.request_body);
+          setRequestBody(JSON.stringify(parsed, null, 2));
+        } catch {
+          setRequestBody(result.request_body);
+        }
+      } else {
+        setRequestBody(null);
+      }
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '获取失败',
+        message: err instanceof Error ? err.message : '获取请求体失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+      setIsDrawerOpen(false);
+    } finally {
+      setIsLoadingBody(false);
+    }
   };
 
   const totalPages = Math.ceil(totalRecords / pageSize);
@@ -701,6 +751,7 @@ export default function AnalyticsPage() {
                             <TableHead className="min-w-[100px]">耗时</TableHead>
                             <TableHead className="min-w-[160px]">时间</TableHead>
                             <TableHead className="min-w-[240px]">错误</TableHead>
+                            <TableHead className="min-w-[80px]">操作</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -758,6 +809,16 @@ export default function AnalyticsPage() {
                                 <div className="max-w-[360px] truncate" title={log.error_message || ''}>
                                   {log.error_message || '-'}
                                 </div>
+                              </TableCell>
+                              <TableCell>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={() => handleViewRequestBody(log.id)}
+                                >
+                                  查看
+                                </Button>
                               </TableCell>
                             </TableRow>
                           ))}
@@ -965,6 +1026,38 @@ export default function AnalyticsPage() {
           </>
         )}
       </div>
+
+      {/* 请求体查看 Drawer */}
+      <Drawer open={isDrawerOpen} onOpenChange={setIsDrawerOpen} direction="right">
+        <DrawerContent className="w-full sm:max-w-2xl">
+          <DrawerHeader>
+            <DrawerTitle>请求体详情</DrawerTitle>
+            <DrawerDescription>
+              日志 ID: {selectedLogId}
+            </DrawerDescription>
+          </DrawerHeader>
+          <div className="flex-1 overflow-auto px-4">
+            {isLoadingBody ? (
+              <div className="flex items-center justify-center h-40">
+                <MorphingSquare message="加载中..." />
+              </div>
+            ) : requestBody ? (
+              <pre className="text-xs font-mono bg-muted p-4 rounded-md overflow-auto max-h-[70vh] whitespace-pre-wrap break-all">
+                {requestBody}
+              </pre>
+            ) : (
+              <div className="text-center py-12 text-muted-foreground">
+                <p className="text-sm">无请求体数据</p>
+              </div>
+            )}
+          </div>
+          <DrawerFooter>
+            <DrawerClose asChild>
+              <Button variant="outline">关闭</Button>
+            </DrawerClose>
+          </DrawerFooter>
+        </DrawerContent>
+      </Drawer>
     </div>
   );
 }

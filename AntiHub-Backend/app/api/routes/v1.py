@@ -437,6 +437,7 @@ async def audio_speech(
             duration_ms=duration_ms,
             tts_voice_id=tts_voice_id,
             tts_account_id=tts_account_id,
+            request_body=request_json,
         )
 
     # 选择账号：voice 必须匹配已保存的音色ID，否则拒绝（403）
@@ -522,6 +523,12 @@ async def image_generations(
     method = raw_request.method
     api_key_id = getattr(current_user, "_api_key_id", None)
 
+    # 先获取 request_json，用于记录请求体
+    try:
+        request_json = await raw_request.json()
+    except Exception:
+        request_json = None
+
     async def _record_usage(
         success: bool,
         status_code: Optional[int],
@@ -546,6 +553,7 @@ async def image_generations(
             status_code=status_code,
             error_message=error_message,
             duration_ms=duration_ms,
+            request_body=request_json,
         )
 
     config_type = getattr(current_user, "_config_type", None)
@@ -559,9 +567,7 @@ async def image_generations(
         await _record_usage(False, status.HTTP_403_FORBIDDEN, "config_type must be zai-image")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="config_type must be zai-image")
 
-    try:
-        request_json = await raw_request.json()
-    except Exception:
+    if request_json is None:
         await _record_usage(False, status.HTTP_400_BAD_REQUEST, "Invalid JSON request body")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON request body")
 
@@ -747,6 +753,7 @@ async def responses(
                             status_code=tracker.status_code or (500 if had_exception else 200),
                             error_message=tracker.error_message,
                             duration_ms=duration_ms,
+                            request_body=request_json,
                         )
                         if _account is not None and (
                             tracker.input_tokens
@@ -805,6 +812,7 @@ async def responses(
                 success=True,
                 status_code=200,
                 duration_ms=duration_ms,
+                request_body=request_json,
             )
             if any([in_tok, out_tok, total_tok, cached_tok]):
                 account_id = int(getattr(account, "id", 0) or 0)
@@ -834,6 +842,7 @@ async def responses(
             status_code=e.status_code,
             error_message=str(e.detail) if hasattr(e, "detail") else str(e),
             duration_ms=duration_ms,
+            request_body=request_json,
         )
         raise
     except UpstreamAPIError as e:
@@ -850,6 +859,7 @@ async def responses(
             status_code=e.status_code,
             error_message=e.extracted_message,
             duration_ms=duration_ms,
+            request_body=request_json,
         )
         return JSONResponse(
             status_code=e.status_code,
@@ -1425,6 +1435,7 @@ async def chat_completions(
                             status_code=tracker.status_code or (500 if had_exception else 200),
                             error_message=tracker.error_message,
                             duration_ms=duration_ms,
+                            request_body=request_json,
                         )
                         if _account is not None and (
                             tracker.input_tokens
@@ -1487,6 +1498,7 @@ async def chat_completions(
                 success=True,
                 status_code=200,
                 duration_ms=duration_ms,
+                request_body=request_json,
             )
             if any([in_tok, out_tok, total_tok, cached_tok]):
                 account_id = int(getattr(account, "id", 0) or 0)
