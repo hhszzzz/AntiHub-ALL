@@ -481,8 +481,8 @@ async def get_request_usage_stats(
 
 @router.get(
     "/requests/logs/{log_id}/request-body",
-    summary="获取单条日志的请求体",
-    description="获取指定日志的原始请求体JSON，用于调试。需要验证日志归属当前用户。",
+    summary="获取单条日志的请求体/请求头",
+    description="获取指定日志的原始请求体JSON与请求头（脱敏后），用于调试。需要验证日志归属当前用户。",
 )
 async def get_request_body(
     log_id: int,
@@ -490,8 +490,8 @@ async def get_request_body(
     db: AsyncSession = Depends(get_db_session),
 ):
     """
-    获取单条日志的请求体
-    返回原始请求体JSON（如果有）
+    获取单条日志的请求体/请求头
+    返回原始请求体JSON（如果有）与请求头（JSON字符串，脱敏后）
     """
     try:
         repo = UsageLogRepository(db)
@@ -507,6 +507,7 @@ async def get_request_body(
             "success": True,
             "data": {
                 "id": log.id,
+                "request_headers": log.request_headers,
                 "request_body": log.request_body,
             }
         }

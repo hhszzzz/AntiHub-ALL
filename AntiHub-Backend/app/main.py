@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
 from app.core.exceptions import BaseAPIException
+from app.core.request_context import RequestContextMiddleware
 from app.db.session import init_db, close_db
 from app.cache import init_redis, close_redis
 from app.api.routes import (
@@ -253,6 +254,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ==================== Request Context（请求头等） ====================
+    # 使用 ASGI middleware（非 BaseHTTPMiddleware），避免影响 StreamingResponse（SSE）
+    app.add_middleware(RequestContextMiddleware)
 
     # ==================== Debug 日志（请求体） ====================
     # 注意：开启后会打印所有请求的原始请求体，可能包含敏感信息（密码/Token等）

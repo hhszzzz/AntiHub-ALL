@@ -771,6 +771,7 @@ async def chat_completions(
                         error_message=tracker.error_message,
                         duration_ms=duration_ms,
                         client_app=raw_request.headers.get("X-App"),
+                        request_headers=raw_request.headers,
                         request_body=request_json,
                     )
 
@@ -801,6 +802,7 @@ async def chat_completions(
             status_code=200,
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
             request_body=request_json,
         )
         return result
@@ -819,6 +821,7 @@ async def chat_completions(
             error_message=str(e),
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
             request_body=request_json,
         )
         raise HTTPException(
@@ -858,6 +861,7 @@ async def chat_completions(
             error_message=error_message,
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
             request_body=request_json,
         )
         raise HTTPException(
@@ -879,6 +883,7 @@ async def chat_completions(
             error_message=str(e),
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
             request_body=request_json,
         )
         raise HTTPException(

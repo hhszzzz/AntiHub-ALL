@@ -23,6 +23,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Drawer,
   DrawerClose,
@@ -79,13 +80,14 @@ export default function AnalyticsPage() {
   const [requestTotalRecords, setRequestTotalRecords] = useState(0);
   // 请求体查看状态
   const [selectedLogId, setSelectedLogId] = useState<number | null>(null);
+  const [requestHeaders, setRequestHeaders] = useState<string | null>(null);
   const [requestBody, setRequestBody] = useState<string | null>(null);
   const [isLoadingBody, setIsLoadingBody] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image'>('antigravity');
   const [isTabInitialized, setIsTabInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingRequests, setIsLoadingRequests] = useState(true);
+  const [isLoadingRequests, setIsLoadingRequests] = useState(false);
   const pageSize = 50;
 
   useEffect(() => {
@@ -112,7 +114,20 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     if (!isTabInitialized) return;
-    loadRequestData();
+
+    if (
+      activeTab === 'qwen' ||
+      activeTab === 'codex' ||
+      activeTab === 'gemini-cli' ||
+      activeTab === 'zai-tts' ||
+      activeTab === 'zai-image'
+    ) {
+      loadRequestData();
+      return;
+    }
+
+    // 非 usage_logs Tab：避免额外请求/报错 Toast，也避免首次进入页面一直转圈
+    setIsLoadingRequests(false);
   }, [isTabInitialized, activeTab, requestCurrentPage]);
 
   const loadTabData = async () => {
@@ -247,10 +262,24 @@ export default function AnalyticsPage() {
     setSelectedLogId(logId);
     setIsDrawerOpen(true);
     setIsLoadingBody(true);
+    setRequestHeaders(null);
     setRequestBody(null);
 
     try {
       const result = await getRequestLogBody(logId);
+
+      if (result.request_headers) {
+        // 尝试格式化 JSON
+        try {
+          const parsedHeaders = JSON.parse(result.request_headers);
+          setRequestHeaders(JSON.stringify(parsedHeaders, null, 2));
+        } catch {
+          setRequestHeaders(result.request_headers);
+        }
+      } else {
+        setRequestHeaders(null);
+      }
+
       if (result.request_body) {
         // 尝试格式化 JSON
         try {
@@ -355,19 +384,15 @@ export default function AnalyticsPage() {
     ((activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && requestLogs.length === 0 && !requestStats);
 
   const requestProviderLabel =
-    activeTab === 'antigravity'
-      ? 'Antigravity'
-      : activeTab === 'kiro'
-        ? 'Kiro'
-        : activeTab === 'codex'
-          ? 'Codex'
-          : activeTab === 'gemini-cli'
-            ? 'GeminiCLI'
-            : activeTab === 'zai-tts'
-              ? 'ZAI TTS'
-              : activeTab === 'zai-image'
-                ? 'ZAI Image'
-                : 'Qwen';
+    activeTab === 'codex'
+      ? 'Codex'
+      : activeTab === 'gemini-cli'
+        ? 'GeminiCLI'
+        : activeTab === 'zai-tts'
+          ? 'ZAI TTS'
+          : activeTab === 'zai-image'
+            ? 'ZAI Image'
+            : 'Qwen';
 
   if ((isLoading || isLoadingRequests) && isFirstLoadForTab) {
     return (
@@ -660,7 +685,7 @@ export default function AnalyticsPage() {
         )}
 
         {/* 请求统计（本系统记录 / usage_logs） */}
-        {(activeTab === 'antigravity' || activeTab === 'kiro' || activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && (
+        {(activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && (
           <>
             <Card className="mb-6">
               <CardHeader>
@@ -810,11 +835,6 @@ export default function AnalyticsPage() {
                                   <div className="text-xs text-muted-foreground font-mono whitespace-nowrap">
                                     {log.model_name || '-'}
                                   </div>
-                                  {log.client_app ? (
-                                    <div className="text-xs text-muted-foreground font-mono whitespace-nowrap">
-                                      app: {log.client_app}
-                                    </div>
-                                  ) : null}
                                 </div>
                               </TableCell>
                               {activeTab === 'zai-tts' && (
@@ -1072,11 +1092,11 @@ export default function AnalyticsPage() {
         )}
       </div>
 
-      {/* 请求体查看 Drawer */}
+      {/* 请求详情 Drawer */}
       <Drawer open={isDrawerOpen} onOpenChange={setIsDrawerOpen} direction="right">
         <DrawerContent className="w-full sm:max-w-2xl">
           <DrawerHeader>
-            <DrawerTitle>请求体详情</DrawerTitle>
+            <DrawerTitle>请求详情</DrawerTitle>
             <DrawerDescription>
               日志 ID: {selectedLogId}
             </DrawerDescription>
@@ -1086,14 +1106,37 @@ export default function AnalyticsPage() {
               <div className="flex items-center justify-center h-40">
                 <MorphingSquare message="加载中..." />
               </div>
-            ) : requestBody ? (
-              <pre className="text-xs font-mono bg-muted p-4 rounded-md overflow-auto max-h-[70vh] whitespace-pre-wrap break-all">
-                {requestBody}
-              </pre>
             ) : (
-              <div className="text-center py-12 text-muted-foreground">
-                <p className="text-sm">无请求体数据</p>
-              </div>
+              <Tabs defaultValue="body" className="w-full">
+                <TabsList className="mb-2">
+                  <TabsTrigger value="headers">请求头</TabsTrigger>
+                  <TabsTrigger value="body">请求体</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="headers">
+                  {requestHeaders ? (
+                    <pre className="text-xs font-mono bg-muted p-4 rounded-md overflow-auto max-h-[70vh] whitespace-pre-wrap break-all">
+                      {requestHeaders}
+                    </pre>
+                  ) : (
+                    <div className="text-center py-12 text-muted-foreground">
+                      <p className="text-sm">无请求头数据</p>
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="body">
+                  {requestBody ? (
+                    <pre className="text-xs font-mono bg-muted p-4 rounded-md overflow-auto max-h-[70vh] whitespace-pre-wrap break-all">
+                      {requestBody}
+                    </pre>
+                  ) : (
+                    <div className="text-center py-12 text-muted-foreground">
+                      <p className="text-sm">无请求体数据</p>
+                    </div>
+                  )}
+                </TabsContent>
+              </Tabs>
             )}
           </div>
           <DrawerFooter>

@@ -1215,6 +1215,7 @@ export async function getRequestUsageLogs(params?: {
  */
 export interface RequestBodyResponse {
   id: number;
+  request_headers?: string | null;
   request_body: string | null;
 }
 

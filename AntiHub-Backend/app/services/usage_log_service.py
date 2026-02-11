@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 MAX_ERROR_MESSAGE_LENGTH = 2000
 MAX_LOGS_PER_CHANNEL = 200
 MAX_REQUEST_BODY_LENGTH = 65536  # 64KB，防止请求体过大
+MAX_REQUEST_HEADERS_LENGTH = 16384  # 16KB，防止请求头过大（写入前会脱敏/截断）
+MAX_SINGLE_HEADER_VALUE_LENGTH = 1024
+MAX_REQUEST_HEADERS_COUNT = 80
 MAX_CLIENT_APP_LENGTH = 128
 
 
@@ -57,6 +60,112 @@ def _truncate_request_body(body: Any) -> Optional[str]:
         return json_str[:MAX_REQUEST_BODY_LENGTH] + "…"
     except Exception:
         return None
+
+
+def _is_sensitive_header(key: str) -> bool:
+    k = key.lower().strip()
+    if not k:
+        return False
+    if k in {"authorization", "proxy-authorization", "cookie", "set-cookie"}:
+        return True
+    if "authorization" in k:
+        return True
+    if "cookie" in k:
+        return True
+    if "token" in k:
+        return True
+    if "api-key" in k or "apikey" in k:
+        return True
+    if "secret" in k or "password" in k or "passwd" in k:
+        return True
+    if "session" in k:
+        return True
+    return False
+
+
+def _truncate_request_headers(headers: Any) -> Optional[str]:
+    """
+    将请求头写入为 JSON 字符串（脱敏 + 截断 + 限量），用于调试展示。
+    注意：这里保存的是“进入本系统”的请求头（raw_request.headers）。
+    """
+    if headers is None:
+        return None
+
+    try:
+        items = headers.items() if hasattr(headers, "items") else list(headers)
+    except Exception:
+        return None
+
+    sanitized: Dict[str, str] = {}
+    try:
+        for key, value in items:
+            if key is None:
+                continue
+            k = str(key)
+            v = "" if value is None else str(value)
+            if _is_sensitive_header(k):
+                sanitized[k] = "[REDACTED]"
+            elif len(v) > MAX_SINGLE_HEADER_VALUE_LENGTH:
+                sanitized[k] = v[:MAX_SINGLE_HEADER_VALUE_LENGTH] + "…"
+            else:
+                sanitized[k] = v
+    except Exception:
+        return None
+
+    if not sanitized:
+        return None
+
+    important_keys = [
+        "X-Api-Type",
+        "X-Account-Type",
+        "X-App",
+        "User-Agent",
+        "Content-Type",
+        "Accept",
+        "Host",
+        "Origin",
+        "Referer",
+    ]
+    important_lower = {k.lower() for k in important_keys}
+
+    # 先按重要性排序，再限制数量，尽量保证最终是合法 JSON（不要直接截断 json 字符串）
+    ordered: list[str] = []
+    for k in important_keys:
+        for present in sanitized.keys():
+            if present.lower() == k.lower():
+                ordered.append(present)
+                break
+    rest = [k for k in sanitized.keys() if k not in ordered]
+    rest.sort(key=lambda s: s.lower())
+    ordered.extend(rest)
+
+    limited_keys = ordered[:MAX_REQUEST_HEADERS_COUNT]
+    limited = {k: sanitized[k] for k in limited_keys}
+
+    def _dump(obj: Dict[str, str]) -> str:
+        return json.dumps(obj, ensure_ascii=False, sort_keys=True, default=str)
+
+    json_str = _dump(limited)
+    if len(json_str) <= MAX_REQUEST_HEADERS_LENGTH:
+        return json_str
+
+    important_only = {k: v for k, v in limited.items() if k.lower() in important_lower}
+    json_str = _dump(important_only)
+    if len(json_str) <= MAX_REQUEST_HEADERS_LENGTH:
+        return json_str
+
+    shrunk = {k: (v[:256] + "…" if len(v) > 256 else v) for k, v in important_only.items()}
+    json_str = _dump(shrunk)
+    if len(json_str) <= MAX_REQUEST_HEADERS_LENGTH:
+        return json_str
+
+    # 最后兜底：保留 keys 列表，避免写入失败
+    return json.dumps(
+        {"_truncated": True, "keys": list(shrunk.keys())[:20]},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
 
 
 def _truncate_client_app(value: Any) -> Optional[str]:
@@ -291,12 +400,21 @@ class UsageLogService:
         tts_voice_id: Optional[str] = None,
         tts_account_id: Optional[str] = None,
         client_app: Optional[str] = None,
+        request_headers: Any = None,
         request_body: Any = None,
     ) -> None:
         """
         写 usage_log（失败也写），写入失败不影响主流程。
         """
         try:
+            if request_headers is None:
+                try:
+                    from app.core.request_context import get_request_headers
+
+                    request_headers = get_request_headers()
+                except Exception:
+                    request_headers = None
+
             session_maker = get_session_maker()
             async with session_maker() as db:
                 log = UsageLog(
@@ -318,6 +436,7 @@ class UsageLogService:
                     tts_voice_id=tts_voice_id,
                     tts_account_id=tts_account_id,
                     client_app=_truncate_client_app(client_app),
+                    request_headers=_truncate_request_headers(request_headers),
                     request_body=_truncate_request_body(request_body),
                 )
                 db.add(log)
