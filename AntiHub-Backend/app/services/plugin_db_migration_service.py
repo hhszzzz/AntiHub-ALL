@@ -2,7 +2,7 @@
 Plugin DB → Backend DB 迁移服务（迁移期）
 
 目标：
-- 在开关开启时，将 AntiHub-plugin DB 的 accounts/model_quotas 导入到 Backend 的 antigravity_* 表
+- 在开关开启时，将 AntiHub-plugin DB 的账号数据导入到 Backend（antigravity_* / kiro_* 等）
 - 使用 Redis 分布式锁避免多实例重复执行；并在迁移失败时阻止启动
 """
 
@@ -25,6 +25,8 @@ from app.cache import RedisClient, get_redis_client
 from app.core.config import get_settings
 from app.models.antigravity_account import AntigravityAccount
 from app.models.antigravity_model_quota import AntigravityModelQuota
+from app.models.kiro_account import KiroAccount
+from app.models.kiro_subscription_model import KiroSubscriptionModel
 from app.models.plugin_api_key import PluginAPIKey
 from app.models.plugin_user_mapping import PluginUserMapping
 from app.utils.encryption import decrypt_api_key, encrypt_api_key
@@ -75,7 +77,8 @@ async def ensure_plugin_db_migrated(db: AsyncSession) -> None:
 
     redis = get_redis_client()
 
-    version = "v1"
+    # v2: 新增 Kiro 相关表迁移（public.kiro_accounts / public.kiro_subscription_models）
+    version = "v2"
     done_key = f"migration:plugin_db_to_backend:done:{version}"
     lock_key = f"migration:plugin_db_to_backend:lock:{version}"
     lock_ttl = int(settings.plugin_db_migration_lock_ttl_seconds or 3600)
@@ -148,10 +151,19 @@ async def _run_migration(*, db: AsyncSession, plugin_engine: AsyncEngine) -> Non
     执行一次迁移（幂等，可重试）。
     """
     plugin_accounts = await _fetch_plugin_accounts(plugin_engine)
-    plugin_user_ids = sorted({str(r["user_id"]) for r in plugin_accounts if r.get("user_id") is not None})
+    plugin_kiro_accounts = await _fetch_plugin_kiro_accounts(plugin_engine)
+    plugin_kiro_subscription_models = await _fetch_plugin_kiro_subscription_models(plugin_engine)
+
+    plugin_user_ids = sorted(
+        {
+            str(r["user_id"])
+            for r in (plugin_accounts + plugin_kiro_accounts)
+            if r.get("user_id") is not None and str(r.get("user_id")).strip()
+        }
+    )
 
     if not plugin_user_ids:
-        logger.info("[migration] no plugin accounts found; nothing to migrate")
+        logger.info("[migration] no plugin data found; nothing to migrate")
         return
 
     plugin_users = await _fetch_plugin_users(plugin_engine)
@@ -163,6 +175,8 @@ async def _run_migration(*, db: AsyncSession, plugin_engine: AsyncEngine) -> Non
         await _upsert_plugin_user_mappings(db=db, mapping=mapping)
         await _upsert_antigravity_accounts(db=db, plugin_accounts=plugin_accounts, mapping=mapping)
         await _upsert_antigravity_model_quotas(db=db, plugin_model_quotas=plugin_model_quotas)
+        await _upsert_kiro_accounts(db=db, plugin_kiro_accounts=plugin_kiro_accounts, mapping=mapping)
+        await _upsert_kiro_subscription_models(db=db, plugin_rows=plugin_kiro_subscription_models)
 
 
 async def _fetch_plugin_users(plugin_engine: AsyncEngine) -> Dict[str, Dict[str, Any]]:
@@ -221,6 +235,38 @@ async def _fetch_plugin_model_quotas(plugin_engine: AsyncEngine) -> List[Dict[st
         result = await conn.execute(text(sql))
         rows = result.mappings().all()
     return [dict(r) for r in rows]
+
+
+async def _fetch_plugin_kiro_accounts(plugin_engine: AsyncEngine) -> List[Dict[str, Any]]:
+    """
+    plugin 的 Kiro 表在历史版本中可能不存在，因此这里 best-effort：
+    - 表存在：SELECT * 全量读取（避免列变更导致迁移脚本失效）
+    - 表不存在/无权限：返回空列表，不阻塞 antigravity 迁移
+    """
+    try:
+        async with plugin_engine.connect() as conn:
+            result = await conn.execute(text("SELECT * FROM public.kiro_accounts"))
+            rows = result.mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning("[migration] fetch plugin kiro_accounts skipped: %s: %s", type(e).__name__, str(e))
+        return []
+
+
+async def _fetch_plugin_kiro_subscription_models(plugin_engine: AsyncEngine) -> List[Dict[str, Any]]:
+    """
+    同 kiro_accounts：历史版本可能不存在，best-effort。
+    """
+    try:
+        async with plugin_engine.connect() as conn:
+            result = await conn.execute(text("SELECT * FROM public.kiro_subscription_models"))
+            rows = result.mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(
+            "[migration] fetch plugin kiro_subscription_models skipped: %s: %s", type(e).__name__, str(e)
+        )
+        return []
 
 
 async def _build_user_mapping(
@@ -401,4 +447,254 @@ async def _upsert_antigravity_model_quotas(*, db: AsyncSession, plugin_model_quo
             },
         )
 
+        await db.execute(stmt)
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    if value is None or isinstance(value, bool):
+        return float(default)
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return int(default)
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if not s:
+            return None
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    return None
+
+
+def _dump_json_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _parse_token_expires_at(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return _naive_dt_to_aware_utc(value)
+    return _ms_to_dt_utc(value)
+
+
+def _parse_dt_utc(value: Any) -> Optional[datetime]:
+    """
+    best-effort 解析时间字段：
+    - datetime -> aware utc
+    - int/float/数字字符串 -> 毫秒时间戳（或秒级，尽量兼容）
+    - ISO8601 字符串 -> aware utc
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return _naive_dt_to_aware_utc(value)
+    if isinstance(value, (int, float)):
+        n = int(value)
+        if n <= 0:
+            return None
+        # > 10^10 认为是毫秒，否则认为是秒
+        return datetime.fromtimestamp(n / 1000.0, tz=timezone.utc) if n > 10_000_000_000 else datetime.fromtimestamp(n, tz=timezone.utc)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            try:
+                return _parse_dt_utc(int(s))
+            except Exception:
+                return None
+        s2 = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        try:
+            dt = datetime.fromisoformat(s2)
+        except Exception:
+            return None
+        return _naive_dt_to_aware_utc(dt)
+    return None
+
+
+async def _upsert_kiro_accounts(
+    *,
+    db: AsyncSession,
+    plugin_kiro_accounts: List[Dict[str, Any]],
+    mapping: Dict[str, _PluginUserMappingResult],
+) -> None:
+    if not plugin_kiro_accounts:
+        return
+
+    for acc in plugin_kiro_accounts:
+        account_id = str(acc.get("account_id") or "").strip() or str(acc.get("id") or "").strip()
+        if not account_id:
+            continue
+
+        is_shared = _coerce_int(acc.get("is_shared"), 0)
+        if is_shared not in (0, 1):
+            is_shared = 0
+
+        plugin_user_id = str(acc.get("user_id") or "").strip()
+        backend_user_id: Optional[int] = None
+        if plugin_user_id:
+            backend_user_id = mapping[plugin_user_id].user_id
+        elif is_shared == 0:
+            # 非共享账号必须能映射到 user_id，否则跳过（避免变成“丢归属”的脏数据）
+            continue
+
+        account_name = (acc.get("account_name") or acc.get("name") or "").strip() or "Imported"
+        auth_method = (acc.get("auth_method") or acc.get("authMethod") or "").strip() or None
+        region = (acc.get("region") or "").strip() or None
+        machineid = (acc.get("machineid") or acc.get("machineId") or "").strip() or None
+        email = (acc.get("email") or "").strip() or None
+        userid = (acc.get("userid") or acc.get("userId") or acc.get("user_id") or "").strip() or None
+        subscription = (acc.get("subscription") or "").strip() or None
+        subscription_type = (acc.get("subscription_type") or acc.get("subscriptionType") or "").strip() or None
+
+        status = _coerce_int(acc.get("status"), 1)
+        status = 1 if status not in (0, 1) else status
+
+        need_refresh = bool(acc.get("need_refresh") or acc.get("needRefresh") or False)
+
+        expires_at_raw = acc.get("expires_at")
+        if expires_at_raw is None:
+            expires_at_raw = acc.get("token_expires_at")
+        token_expires_at = _parse_token_expires_at(expires_at_raw)
+
+        bonus_details_text = _dump_json_text(acc.get("bonus_details") or acc.get("bonusDetails"))
+        free_trial_status = _coerce_bool(acc.get("free_trial_status") or acc.get("freeTrialStatus"))
+
+        stmt = pg_insert(KiroAccount).values(
+            account_id=account_id,
+            user_id=backend_user_id,
+            account_name=account_name,
+            auth_method=auth_method,
+            region=region,
+            machineid=machineid,
+            email=email,
+            userid=userid,
+            subscription=subscription,
+            subscription_type=subscription_type,
+            is_shared=is_shared,
+            status=status,
+            need_refresh=need_refresh,
+            token_expires_at=token_expires_at,
+            current_usage=_coerce_float(acc.get("current_usage") or acc.get("currentUsage"), 0.0),
+            usage_limit=_coerce_float(acc.get("usage_limit") or acc.get("usageLimit"), 0.0),
+            reset_date=_parse_dt_utc(acc.get("reset_date") or acc.get("resetDate")),
+            bonus_usage=_coerce_float(acc.get("bonus_usage") or acc.get("bonusUsage"), 0.0),
+            bonus_limit=_coerce_float(acc.get("bonus_limit") or acc.get("bonusLimit"), 0.0),
+            bonus_details=bonus_details_text,
+            free_trial_status=free_trial_status,
+            free_trial_usage=_coerce_float(acc.get("free_trial_usage") or acc.get("freeTrialUsage"), 0.0)
+            if acc.get("free_trial_usage") is not None or acc.get("freeTrialUsage") is not None
+            else None,
+            free_trial_limit=_coerce_float(acc.get("free_trial_limit") or acc.get("freeTrialLimit"), 0.0)
+            if acc.get("free_trial_limit") is not None or acc.get("freeTrialLimit") is not None
+            else None,
+            free_trial_expiry=_parse_dt_utc(acc.get("free_trial_expiry") or acc.get("freeTrialExpiry")),
+            credentials=encrypt_api_key(
+                json.dumps(
+                    {
+                        "type": "kiro",
+                        "refresh_token": acc.get("refresh_token") or acc.get("refreshToken"),
+                        "access_token": acc.get("access_token") or acc.get("accessToken"),
+                        "client_id": acc.get("client_id") or acc.get("clientId"),
+                        "client_secret": acc.get("client_secret") or acc.get("clientSecret"),
+                        "profile_arn": acc.get("profile_arn") or acc.get("profileArn"),
+                        "machineid": machineid,
+                        "region": region,
+                        "auth_method": auth_method,
+                        "expires_at_ms": expires_at_raw if isinstance(expires_at_raw, (int, float, str)) else None,
+                    },
+                    ensure_ascii=False,
+                )
+            ),
+            updated_at=func.now(),
+        )
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[KiroAccount.account_id],
+            set_={
+                "user_id": backend_user_id,
+                "account_name": account_name,
+                "auth_method": auth_method,
+                "region": region,
+                "machineid": machineid,
+                "email": email,
+                "userid": userid,
+                "subscription": subscription,
+                "subscription_type": subscription_type,
+                "is_shared": is_shared,
+                "status": status,
+                "need_refresh": need_refresh,
+                "token_expires_at": token_expires_at,
+                "current_usage": _coerce_float(acc.get("current_usage") or acc.get("currentUsage"), 0.0),
+                "usage_limit": _coerce_float(acc.get("usage_limit") or acc.get("usageLimit"), 0.0),
+                "reset_date": _parse_dt_utc(acc.get("reset_date") or acc.get("resetDate")),
+                "bonus_usage": _coerce_float(acc.get("bonus_usage") or acc.get("bonusUsage"), 0.0),
+                "bonus_limit": _coerce_float(acc.get("bonus_limit") or acc.get("bonusLimit"), 0.0),
+                "bonus_details": bonus_details_text,
+                "free_trial_status": free_trial_status,
+                "free_trial_usage": _coerce_float(acc.get("free_trial_usage") or acc.get("freeTrialUsage"), 0.0)
+                if acc.get("free_trial_usage") is not None or acc.get("freeTrialUsage") is not None
+                else None,
+                "free_trial_limit": _coerce_float(acc.get("free_trial_limit") or acc.get("freeTrialLimit"), 0.0)
+                if acc.get("free_trial_limit") is not None or acc.get("freeTrialLimit") is not None
+                else None,
+                "free_trial_expiry": _parse_dt_utc(acc.get("free_trial_expiry") or acc.get("freeTrialExpiry")),
+                "credentials": stmt.excluded.credentials,
+                "updated_at": func.now(),
+            },
+        )
+
+        await db.execute(stmt)
+
+
+async def _upsert_kiro_subscription_models(*, db: AsyncSession, plugin_rows: List[Dict[str, Any]]) -> None:
+    if not plugin_rows:
+        return
+
+    for r in plugin_rows:
+        subscription = str(r.get("subscription") or "").strip()
+        if not subscription:
+            continue
+
+        raw_models = r.get("allowed_model_ids")
+        if raw_models is None:
+            raw_models = r.get("model_ids")
+        allowed_model_ids = _dump_json_text(raw_models)
+
+        stmt = pg_insert(KiroSubscriptionModel).values(
+            subscription=subscription,
+            allowed_model_ids=allowed_model_ids,
+            updated_at=func.now(),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[KiroSubscriptionModel.subscription],
+            set_={"allowed_model_ids": allowed_model_ids, "updated_at": func.now()},
+        )
         await db.execute(stmt)

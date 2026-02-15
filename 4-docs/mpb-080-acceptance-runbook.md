@@ -59,7 +59,10 @@ curl -sS -i http://localhost:8000/api/plugin-api/quotas/consumption
 
 ## 3) 迁移验收（可选）
 
-说明：迁移用于把旧 plugin DB 的 `accounts/model_quotas` 导入到 Backend 的 `antigravity_*` 表。
+说明：迁移用于把旧 plugin DB 的账号数据导入到 Backend 的本地表：
+- `public.accounts/model_quotas` → `antigravity_*`
+- `public.kiro_accounts` → `kiro_accounts`（如源库存在该表）
+- `public.kiro_subscription_models` → `kiro_subscription_models`（如源库存在该表）
 
 1) 准备迁移环境变量（写入 `.env`）：
 

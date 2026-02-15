@@ -18,6 +18,8 @@ from app.models.usage_counter import UsageCounter
 from app.models.antigravity_account import AntigravityAccount
 from app.models.antigravity_model_quota import AntigravityModelQuota
 from app.models.qwen_account import QwenAccount
+from app.models.kiro_account import KiroAccount
+from app.models.kiro_subscription_model import KiroSubscriptionModel
 
 __all__ = [
     "User",
@@ -36,4 +38,6 @@ __all__ = [
     "AntigravityAccount",
     "AntigravityModelQuota",
     "QwenAccount",
+    "KiroAccount",
+    "KiroSubscriptionModel",
 ]

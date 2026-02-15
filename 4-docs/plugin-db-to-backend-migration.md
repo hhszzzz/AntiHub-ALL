@@ -1,6 +1,6 @@
 # Plugin DB → Backend DB 迁移（迁移期开关）
 
-用途：把旧 `AntiHub-plugin` 的 DB（主要是 `accounts` / `model_quotas`）导入到 Backend 的 `antigravity_*` 表，供 `/api/plugin-api/accounts/*` 与 `/api/plugin-api/quotas/user` 等接口读取。
+用途：把旧 `AntiHub-plugin` 的 DB 导入到 Backend 的本地表（`antigravity_*` / `kiro_*`），用于在**不启动 AntiHub-plugin** 的部署形态下继续读取账号数据。
 
 ## 1) 开关与配置
 
@@ -18,6 +18,8 @@
 
 - `AntiHub-plugin.public.accounts` → `AntiHub-Backend.antigravity_accounts`
 - `AntiHub-plugin.public.model_quotas` → `AntiHub-Backend.antigravity_model_quotas`
+- `AntiHub-plugin.public.kiro_accounts` → `AntiHub-Backend.kiro_accounts`（如源库存在该表）
+- `AntiHub-plugin.public.kiro_subscription_models` → `AntiHub-Backend.kiro_subscription_models`（如源库存在该表）
 - `AntiHub-Backend.plugin_user_mappings`：记录 `plugin users.user_id(UUID)` → `Backend users.id` 的映射（仅迁移期使用，不进入运行时请求链路）
 
 ## 3) 手动验证（抽样核对点）
@@ -40,4 +42,3 @@
 ## 4) 常见问题
 
 - 如果 backend 报 “mapping missing”：说明 plugin DB 里存在 `accounts.user_id` 在 backend 侧找不到对应用户映射，需要先补齐（通常来自 `plugin_api_keys.plugin_user_id` 或 api_key 匹配）。
-

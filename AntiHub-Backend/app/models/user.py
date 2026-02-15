@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from app.models.gemini_cli_account import GeminiCLIAccount
     from app.models.antigravity_account import AntigravityAccount
     from app.models.qwen_account import QwenAccount
+    from app.models.kiro_account import KiroAccount
     from app.models.zai_tts_account import ZaiTTSAccount
     from app.models.zai_image_account import ZaiImageAccount
 
@@ -158,6 +159,12 @@ class User(Base):
 
     qwen_accounts: Mapped[list["QwenAccount"]] = relationship(
         "QwenAccount",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    kiro_accounts: Mapped[list["KiroAccount"]] = relationship(
+        "KiroAccount",
         back_populates="user",
         cascade="all, delete-orphan",
     )
