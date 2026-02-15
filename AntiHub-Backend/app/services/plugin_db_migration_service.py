@@ -155,12 +155,11 @@ async def _run_migration(*, db: AsyncSession, plugin_engine: AsyncEngine) -> Non
         return
 
     plugin_users = await _fetch_plugin_users(plugin_engine)
-    mapping = await _build_user_mapping(db=db, plugin_user_ids=plugin_user_ids, plugin_users=plugin_users)
-
     plugin_model_quotas = await _fetch_plugin_model_quotas(plugin_engine)
 
     # 写入 Backend：单事务，失败回滚，避免半迁移状态
     async with db.begin():
+        mapping = await _build_user_mapping(db=db, plugin_user_ids=plugin_user_ids, plugin_users=plugin_users)
         await _upsert_plugin_user_mappings(db=db, mapping=mapping)
         await _upsert_antigravity_accounts(db=db, plugin_accounts=plugin_accounts, mapping=mapping)
         await _upsert_antigravity_model_quotas(db=db, plugin_model_quotas=plugin_model_quotas)
@@ -403,4 +402,3 @@ async def _upsert_antigravity_model_quotas(*, db: AsyncSession, plugin_model_quo
         )
 
         await db.execute(stmt)
-
