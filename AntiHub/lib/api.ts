@@ -105,8 +105,23 @@ async function handleResponse<T>(response: Response): Promise<T> {
     } else {
       errorMessage = `HTTP ${response.status}: ${response.statusText}`;
     }
+
+    // 统一处理 410 Gone（已废弃的接口）
+    if (response.status === 410) {
+      const alternative =
+        (typeof errorBody?.alternative === 'string' && errorBody.alternative) ||
+        (typeof errorBody?.detail?.alternative === 'string' && errorBody.detail.alternative) ||
+        null;
+
+      if (alternative && !errorMessage.includes(alternative)) {
+        errorMessage = `${errorMessage}\n替代：${alternative}`;
+      }
+    }
     
-    throw new Error(errorMessage);
+    const err = new Error(errorMessage) as Error & { status?: number; alternative?: string };
+    err.status = response.status;
+    if (typeof errorBody?.alternative === 'string') err.alternative = errorBody.alternative;
+    throw err;
   }
   
   return response.json();
@@ -1145,6 +1160,9 @@ export async function getUserQuotas(): Promise<UserQuotaItem[]> {
 
 /**
  * 获取配额消耗记录
+ *
+ * @deprecated plugin-era 接口已弃用（Backend 返回 410）。
+ *             请使用 `/api/usage/requests/*` 对应的 `getRequestUsageStats/getRequestUsageLogs`。
  */
 export async function getQuotaConsumption(params?: {
   limit?: number;

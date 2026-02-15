@@ -13,10 +13,7 @@ import {
 } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
-  getQuotaConsumption,
   getKiroAccounts,
-  getKiroConsumptionStats,
-  getKiroAccountConsumption,
   getRequestUsageStats,
   getAccounts,
   getQwenAccounts,
@@ -26,10 +23,10 @@ import {
 interface ComputedStats {
   totalAccounts: number;
   activeAccounts: number;
-  consumedLast24h: number;
+  tokensLast24h: number;
   callsLast24h: number;
   totalRequests: number;
-  totalQuotaConsumed: number;
+  totalTokens: number;
 }
 
 export function SectionCards() {
@@ -43,64 +40,53 @@ export function SectionCards() {
         const now = new Date();
         const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-        const [antigravityAccounts, antigravityConsumption, qwenAccounts, qwenStats24h, qwenStatsAll, codexAccounts, codexStats24h, codexStatsAll] = await Promise.all([
+        const [
+          antigravityAccounts,
+          kiroAccounts,
+          qwenAccounts,
+          codexAccounts,
+          antigravityStats24h,
+          antigravityStatsAll,
+          kiroStats24h,
+          kiroStatsAll,
+          qwenStats24h,
+          qwenStatsAll,
+          codexStats24h,
+          codexStatsAll,
+        ] = await Promise.all([
           getAccounts(),
-          getQuotaConsumption({ limit: 1000 }),
+          getKiroAccounts().catch(() => []),
           getQwenAccounts().catch(() => []),
+          getCodexAccounts().catch(() => []),
+          getRequestUsageStats({ start_date: last24h.toISOString(), config_type: 'antigravity' }).catch(() => null),
+          getRequestUsageStats({ config_type: 'antigravity' }).catch(() => null),
+          getRequestUsageStats({ start_date: last24h.toISOString(), config_type: 'kiro' }).catch(() => null),
+          getRequestUsageStats({ config_type: 'kiro' }).catch(() => null),
           getRequestUsageStats({ start_date: last24h.toISOString(), config_type: 'qwen' }).catch(() => null),
           getRequestUsageStats({ config_type: 'qwen' }).catch(() => null),
-          getCodexAccounts().catch(() => []),
           getRequestUsageStats({ start_date: last24h.toISOString(), config_type: 'codex' }).catch(() => null),
           getRequestUsageStats({ config_type: 'codex' }).catch(() => null),
         ]);
 
-        // 计算24小时内的消耗
-        const recentConsumption = antigravityConsumption.filter(c => new Date(c.consumed_at) >= last24h);
-        const antigravityConsumedLast24h = recentConsumption.reduce((sum, c) => sum + (Number.parseFloat(c.quota_consumed) || 0), 0);
-        const antigravityCallsLast24h = recentConsumption.length;
-        const antigravityTotalQuotaConsumed = antigravityConsumption.reduce((sum, c) => sum + (Number.parseFloat(c.quota_consumed) || 0), 0);
-        const antigravityTotalRequests = antigravityConsumption.length;
+        const antigravityCallsLast24h = antigravityStats24h?.total_requests || 0;
+        const antigravityTotalRequests = antigravityStatsAll?.total_requests || 0;
+        const antigravityTokensLast24h = antigravityStats24h?.total_tokens || 0;
+        const antigravityTotalTokens = antigravityStatsAll?.total_tokens || 0;
+
+        const kiroCallsLast24h = kiroStats24h?.total_requests || 0;
+        const kiroTotalRequests = kiroStatsAll?.total_requests || 0;
+        const kiroTokensLast24h = kiroStats24h?.total_tokens || 0;
+        const kiroTotalTokens = kiroStatsAll?.total_tokens || 0;
 
         const qwenCallsLast24h = qwenStats24h?.total_requests || 0;
         const qwenTotalRequests = qwenStatsAll?.total_requests || 0;
+        const qwenTokensLast24h = qwenStats24h?.total_tokens || 0;
+        const qwenTotalTokens = qwenStatsAll?.total_tokens || 0;
 
         const codexCallsLast24h = codexStats24h?.total_requests || 0;
         const codexTotalRequests = codexStatsAll?.total_requests || 0;
-
-        // 获取 Kiro 数据
-        let kiroAccounts: any[] = [];
-        let totalKiroRequests = 0;
-        let totalKiroQuotaConsumed = 0;
-        let kiroConsumedLast24h = 0;
-        let kiroCallsLast24h = 0;
-
-        try {
-          // 获取 Kiro 账号
-          kiroAccounts = await getKiroAccounts();
-
-          // 获取 Kiro 消费统计
-          const kiroStats = await getKiroConsumptionStats();
-          totalKiroRequests = Number.parseInt(kiroStats.total_requests, 10) || 0;
-          totalKiroQuotaConsumed = Number.parseFloat(kiroStats.total_credit) || 0;
-
-          // 计算 Kiro 24小时数据（按账号聚合）
-          if (kiroAccounts.length > 0) {
-            const responses = await Promise.all(
-              kiroAccounts.map((account) =>
-                getKiroAccountConsumption(account.account_id, {
-                  limit: 1000,
-                  start_date: last24h.toISOString(),
-                  end_date: now.toISOString(),
-                }).catch(() => null)
-              )
-            );
-            const logs = responses.flatMap((resp) => resp?.logs ?? []);
-            kiroConsumedLast24h = logs.reduce((sum, log) => sum + (log.credit_used || 0), 0);
-            kiroCallsLast24h = logs.length;
-          }
-        } catch (err) {
-          console.warn('加载 Kiro 数据失败，仅显示 Antigravity 数据', err);
-        }
+        const codexTokensLast24h = codexStats24h?.total_tokens || 0;
+        const codexTotalTokens = codexStatsAll?.total_tokens || 0;
 
         const totalAccounts = antigravityAccounts.length + kiroAccounts.length + qwenAccounts.length + codexAccounts.length;
         const activeAccounts =
@@ -112,10 +98,10 @@ export function SectionCards() {
         setStats({
           totalAccounts,
           activeAccounts,
-          consumedLast24h: antigravityConsumedLast24h + kiroConsumedLast24h,
+          tokensLast24h: antigravityTokensLast24h + kiroTokensLast24h + qwenTokensLast24h + codexTokensLast24h,
           callsLast24h: antigravityCallsLast24h + kiroCallsLast24h + qwenCallsLast24h + codexCallsLast24h,
-          totalRequests: antigravityTotalRequests + totalKiroRequests + qwenTotalRequests + codexTotalRequests,
-          totalQuotaConsumed: antigravityTotalQuotaConsumed + totalKiroQuotaConsumed,
+          totalRequests: antigravityTotalRequests + kiroTotalRequests + qwenTotalRequests + codexTotalRequests,
+          totalTokens: antigravityTotalTokens + kiroTotalTokens + qwenTotalTokens + codexTotalTokens,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载数据失败');
@@ -196,9 +182,9 @@ export function SectionCards() {
       </Card>
       <Card className="@container/card">
         <CardHeader>
-          <CardDescription>24小时配额消耗</CardDescription>
+          <CardDescription>24小时 Tokens</CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {(parseFloat(String(stats?.consumedLast24h)) || 0).toFixed(2)}
+            {(stats?.tokensLast24h || 0).toLocaleString()}
           </CardTitle>
           <CardAction>
             <Badge variant="outline">
@@ -208,9 +194,9 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            总消耗: {(parseFloat(String(stats?.totalQuotaConsumed)) || 0).toFixed(2)}
+            总 Tokens: {(stats?.totalTokens || 0).toLocaleString()}
           </div>
-          <div className="text-muted-foreground">全部渠道配额消耗合计</div>
+          <div className="text-muted-foreground">全部渠道 Tokens 合计</div>
         </CardFooter>
       </Card>
       <Card className="@container/card">

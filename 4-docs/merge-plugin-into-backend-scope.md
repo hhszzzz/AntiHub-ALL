@@ -59,7 +59,7 @@
 | `PUT /api/plugin-api/accounts/{cookie_id}/quotas/{model_name}/status` | 更新模型配额状态 | 保留 | DB 本地实现 |
 | `PUT /api/plugin-api/accounts/{cookie_id}/status` | 更新账号状态 | 保留 | DB 本地实现 |
 | `PUT /api/plugin-api/accounts/{cookie_id}/type` | 转换账号类型 | 保留 | DB 本地实现 |
-| `PUT /api/plugin-api/preference` | 更新 Cookie 优先级 | 保留 | DB 本地实现 |
+| `PUT /api/plugin-api/preference` | 更新 Cookie 优先级 | 410 | prefer_shared 机制弃用（见 §5） |
 
 ## 5) 410 / 不提供接口清单（来源：`Report.md` 11.2.3）
 
@@ -70,13 +70,16 @@
 - `GET /api/plugin-api/quotas/shared-pool`：**返回 410**  
   - 前端处理：展示“共享池配额已弃用”的提示，不再重试该接口
 - `GET /api/plugin-api/quotas/consumption`：**返回 410**  
-  - 替代路径：`/api/usage/requests/*`  
-  - 前端处理：展示提示 +（如需要）引导跳转到替代页面/入口
+   - 替代路径：`/api/usage/requests/*`  
+   - 前端处理：展示提示 +（如需要）引导跳转到替代页面/入口
+- `PUT /api/plugin-api/preference`：**返回 410**  
+  - 前端处理：不再展示/保存 prefer_shared；如仍调用则提示“已弃用”
 
 **410 响应约定（最小可用）**：
 
 - status：`410`
-- body：`{"detail":"<可读提示>","alternative":"</api/usage/requests/* 可选>"}`
+- body：推荐 `{"error":"<可读提示>","alternative":"</api/usage/requests/* 可选>"}`  
+  - 兼容：也可能返回 FastAPI 默认格式 `{"detail":"..."}`（前端需同时兼容 `detail/error/message`）。
 
 ### 5.2 合并后不提供（不属于 Backend 对外契约）
 
@@ -98,4 +101,3 @@
 - `4-docs/BACKEND_PUBLIC_ROUTES.csv`（public routes 基线）
 - `4-docs/plugin_touchpoints.csv`（plugin 触点表）
 - `Report.md`（特别是 11.2.3）
-

@@ -22,7 +22,13 @@
 - https://github.com/AntiHub-Project/Antigv-plugin
 - https://github.com/AntiHub-Project/Backend
 
-这个仓库把 `AntiHub`（前端）、`AntiHub-Backend`（后端）、`AntiHub-plugin`（插件服务）统一成一套 `docker compose` 部署。目标很简单：三者之间的内部地址/端口都已经预置好；默认 `docker-compose.yml` 自带 PostgreSQL + Redis，你主要只需要配置你自己的密钥；如果你想接入外部 PG/Redis，用 `docker-compose.core.yml`。
+这个仓库把 `AntiHub`（前端）与 `AntiHub-Backend`（后端）统一成一套 `docker compose` 部署。历史上还包含 `AntiHub-plugin`（插件服务），但目前正在将 plugin 能力合并进 Backend，最终运行时 **不再部署 plugin**。默认 `docker-compose.yml` 自带 PostgreSQL + Redis，你主要只需要配置你自己的密钥；如果你想接入外部 PG/Redis，用 `docker-compose.core.yml`。
+
+## Plugin 下线与替代路径（迁移中）
+
+- 前端用量/Analytics 已切换到 Backend 的 `/api/usage/requests/*`（旧的 `/api/plugin-api/quotas/consumption` 等接口会返回 410 Gone）。
+- 运行时不要让任何客户端直连 `AntiHub-plugin:8045`；统一通过 Backend 对外入口。
+- 数据迁移开关与 plugin DB → Backend DB 的幂等迁移流程仍在推进中（详见 `4-docs/merge-plugin-into-backend-scope.md`）。
 
 ## 注意事项
 
@@ -104,7 +110,7 @@ docker compose up -d
 
 > 只启动基础的三件套`docker compose -f docker-compose.core.yml up -d `
 
-**注意**：插件服务会在首次启动时自动检测并初始化数据库，无需手动导入 `schema.sql`。
+**注意**：迁移中版本可能仍包含插件服务；但最终将不再部署 plugin，数据库以 Backend 的 Alembic migrations 为准。
 
 3) 访问前端：
 

@@ -3,7 +3,6 @@
 import { useEffect, useState, useRef } from 'react';
 import {
   getUserQuotas,
-  getQuotaConsumption,
   getKiroConsumptionStats,
   getKiroAccounts,
   getKiroAccountConsumption,
@@ -126,18 +125,14 @@ export default function AnalyticsPage() {
     setIsLoading(true);
     try {
       if (activeTab === 'antigravity') {
-        const [quotasData, consumptionsData] = await Promise.all([
-          getUserQuotas(),
-          getQuotaConsumption({ limit: 1000 }) // 获取更多记录用于分页
-        ]);
+        const quotasData = await getUserQuotas();
         setQuotas(quotasData);
-        setAllConsumptions(consumptionsData);
-        setAntigravityTotalRecords(consumptionsData.length);
 
-        // 前端分页
-        const startIndex = (antigravityCurrentPage - 1) * pageSize;
-        const endIndex = startIndex + pageSize;
-        setConsumptions(consumptionsData.slice(startIndex, endIndex));
+        // 兼容：配额消耗明细接口（plugin-era）已弃用（410），此处清空旧状态，统一以「请求记录」为准
+        if (antigravityCurrentPage !== 1) setAntigravityCurrentPage(1);
+        if (allConsumptions.length) setAllConsumptions([]);
+        if (consumptions.length) setConsumptions([]);
+        if (antigravityTotalRecords !== 0) setAntigravityTotalRecords(0);
       } else if (activeTab === 'kiro') {
         const [statsData, accountsData] = await Promise.all([
           getKiroConsumptionStats(),
@@ -570,14 +565,14 @@ export default function AnalyticsPage() {
             <CardHeader>
               <CardTitle>使用记录</CardTitle>
               <CardDescription>
-                共 {antigravityTotalRecords} 条使用记录
+                配额消耗明细（旧接口）已弃用，请以「请求记录」为准
               </CardDescription>
             </CardHeader>
             <CardContent>
               {consumptions.length === 0 ? (
                 <div className="text-center py-12 text-muted-foreground">
-                  <p className="text-lg mb-2">暂无使用记录</p>
-                  <p className="text-sm">立即创建您的 API Key 开始对话吧！</p>
+                  <p className="text-lg mb-2">配额消耗明细已迁移</p>
+                  <p className="text-sm">请查看下方「请求统计 / 请求记录」获取最新用量信息</p>
                 </div>
               ) : (
                 <>

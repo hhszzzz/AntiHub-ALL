@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
-import { getQuotaConsumption, type QuotaConsumption, getKiroAccounts, getKiroAccountConsumption, type KiroConsumptionLog } from "@/lib/api"
+import { getRequestUsageLogs, type ApiType, type RequestUsageLogItem } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Card,
@@ -28,11 +28,11 @@ import {
 
 const chartConfig = {
   antigravity: {
-    label: "Antigravity 配额消耗",
+    label: "Antigravity Tokens",
     color: "hsl(var(--chart-1))",
   },
   kiro: {
-    label: "Kiro 配额消耗",
+    label: "Kiro Tokens",
     color: "hsl(var(--chart-2))",
   },
 } satisfies ChartConfig
@@ -58,49 +58,59 @@ export function QuotaTrendChart() {
         const now = new Date()
         const startTime = new Date(now.getTime() - hours * 60 * 60 * 1000)
 
-        // 获取 Antigravity 消耗记录
-        const antigravityData = await getQuotaConsumption({
-          limit: 1000,
-          start_date: startTime.toISOString(),
-          end_date: now.toISOString()
-        })
+        const fetchLogsForTrend = async (configType: ApiType): Promise<RequestUsageLogItem[]> => {
+          const limit = 200
+          let offset = 0
+          const logs: RequestUsageLogItem[] = []
+          const start_date = startTime.toISOString()
+          const end_date = now.toISOString()
 
-        // 获取 Kiro 消耗记录
-        let kiroData: KiroConsumptionLog[] = []
-        try {
-          const kiroAccounts = await getKiroAccounts()
-          // 获取所有 Kiro 账号的消费记录
-          const kiroPromises = kiroAccounts.map(account =>
-            getKiroAccountConsumption(account.account_id, {
-              limit: 1000,
-              start_date: startTime.toISOString(),
-              end_date: now.toISOString()
-            }).then(result => result.logs)
-          )
-          const allLogs = await Promise.all(kiroPromises)
-          kiroData = allLogs.flat()
-        } catch (err) {
-          console.warn('加载 Kiro 数据失败，仅显示 Antigravity 数据', err)
+          // 最多拉取 5 页（1000 条），避免在高频使用时影响首屏性能
+          for (let page = 0; page < 5; page++) {
+            const result = await getRequestUsageLogs({
+              config_type: configType,
+              limit,
+              offset,
+              start_date,
+              end_date,
+            })
+
+            logs.push(...result.logs)
+
+            if (logs.length >= result.pagination.total) break
+            if (result.logs.length < limit) break
+
+            offset += limit
+          }
+
+          return logs
         }
+
+        const [antigravityLogs, kiroLogs] = await Promise.all([
+          fetchLogsForTrend("antigravity"),
+          fetchLogsForTrend("kiro"),
+        ])
 
         // 按小时聚合数据
         const hourlyData = new Map<string, { antigravity: number; kiro: number }>()
 
-        // 聚合 Antigravity 数据
-        antigravityData.forEach(record => {
-          const date = new Date(record.consumed_at)
+        // 聚合 Antigravity 数据（usage_logs）
+        antigravityLogs.forEach(record => {
+          if (!record.created_at) return
+          const date = new Date(record.created_at)
           const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCHours()).padStart(2, '0')}`
           const existing = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
-          existing.antigravity += parseFloat(record.quota_consumed)
+          existing.antigravity += Number(record.total_tokens || 0)
           hourlyData.set(hourKey, existing)
         })
 
-        // 聚合 Kiro 数据
-        kiroData.forEach(record => {
-          const date = new Date(record.consumed_at)
+        // 聚合 Kiro 数据（usage_logs）
+        kiroLogs.forEach(record => {
+          if (!record.created_at) return
+          const date = new Date(record.created_at)
           const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCHours()).padStart(2, '0')}`
           const existing = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
-          existing.kiro += record.credit_used
+          existing.kiro += Number(record.total_tokens || 0)
           hourlyData.set(hourKey, existing)
         })
 
@@ -147,8 +157,8 @@ export function QuotaTrendChart() {
     return (
       <Card className="@container/card">
         <CardHeader>
-          <CardTitle>配额消耗趋势</CardTitle>
-          <CardDescription>配额使用情况</CardDescription>
+          <CardTitle>Tokens 趋势</CardTitle>
+          <CardDescription>本系统 usage_logs 统计</CardDescription>
         </CardHeader>
         <CardContent className="flex items-center justify-center h-[250px]">
           <div className="text-red-500 text-sm">{error}</div>
@@ -160,7 +170,7 @@ export function QuotaTrendChart() {
   return (
     <Card className="@container/card">
       <CardHeader>
-        <CardTitle>配额消耗趋势</CardTitle>
+        <CardTitle>Tokens 趋势</CardTitle>
         <CardAction>
           <Select value={timeRange} onValueChange={setTimeRange}>
             <SelectTrigger
