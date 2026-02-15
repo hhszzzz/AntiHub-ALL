@@ -2,8 +2,8 @@
 Qwen 账号相关的数据模型
 
 说明：
-- 本后端不直接与 Qwen 通信；所有账号数据与请求转发都通过 AntiHub-plugin 完成。
-- 这里的 API 只是把用户输入的 QwenCli 导出 JSON 代理给 plug-in 做落库与校验。
+- 账号数据存储在 Backend 数据库（qwen_accounts），凭证以加密 JSON 形式落库。
+- OAuth Device Flow 的 state 存储在 Redis；前端通过轮询 /api/qwen/oauth/status/{state} 驱动完成登录。
 """
 
 from typing import Optional

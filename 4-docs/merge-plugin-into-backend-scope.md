@@ -29,6 +29,48 @@
 - 实现从“HTTP 代理到 plugin”切换为“Backend 本地实现”（DB 读写 + 本地逻辑）。
 - 对明确废弃的接口：返回 **HTTP 410 Gone**，并提供 **可读提示**（前端可直接展示），如存在替代路径则附带替代路径。
 
+### 3.3 `/v1/chat/completions` 渠道选择与流式转发（Antigravity / Kiro / Qwen）
+
+最小约定（用于对齐前端/调用方与后端实现）：
+
+- **API Key 调用**：根据 API key 绑定的 `config_type` 选择渠道（`antigravity|kiro|qwen`）
+- **JWT 调用**：默认 `antigravity`；可用请求头 `X-Api-Type: antigravity|kiro|qwen` 覆盖
+- **`stream=true`**：返回 SSE（`text/event-stream`），后端做“透传 + 统一 framing”，并在必要时输出 OpenAI 兼容错误事件
+- **`stream=false`**：返回 JSON（OpenAI ChatCompletions）；内部实现允许“走上游 SSE 再收集聚合”为 JSON，以保证错误语义与 usage 统计一致
+- **多实例一致性**：OAuth/device flow 的 `state` 必须落 Redis（不得使用进程内 map）；账号凭证落 Backend DB（加密字段）
+
+手工回归（示例，需替换真实密钥/Token/模型）：
+
+```bash
+# 1) Qwen（stream=true）
+curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY_OR_JWT>" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Type: qwen" \
+  -d '{"model":"qwen-plus","stream":true,"messages":[{"role":"user","content":"hello"}]}'
+
+# 2) Qwen（stream=false）
+curl -sS -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY_OR_JWT>" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Type: qwen" \
+  -d '{"model":"qwen-plus","stream":false,"messages":[{"role":"user","content":"hello"}]}'
+
+# 3) Antigravity（stream=true）
+curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY_OR_JWT>" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Type: antigravity" \
+  -d '{"model":"gemini-2.5-pro","stream":true,"messages":[{"role":"user","content":"hello"}]}'
+
+# 4) Kiro（stream=true）
+curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY_OR_JWT>" \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Type: kiro" \
+  -d '{"model":"<kiro-model>","stream":true,"messages":[{"role":"user","content":"hello"}]}'
+```
+
 ## 4) 必保留接口清单（来源：`BACKEND_PUBLIC_ROUTES.csv`）
 
 说明：全量接口请以 `4-docs/BACKEND_PUBLIC_ROUTES.csv` 为准；下表仅列出本次迁移范围内的关键 `/api/plugin-api` 路由，便于会议 review 时聚焦。

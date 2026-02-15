@@ -17,6 +17,7 @@ from app.models.zai_image_account import ZaiImageAccount
 from app.models.usage_counter import UsageCounter
 from app.models.antigravity_account import AntigravityAccount
 from app.models.antigravity_model_quota import AntigravityModelQuota
+from app.models.qwen_account import QwenAccount
 
 __all__ = [
     "User",
@@ -34,4 +35,5 @@ __all__ = [
     "UsageCounter",
     "AntigravityAccount",
     "AntigravityModelQuota",
+    "QwenAccount",
 ]

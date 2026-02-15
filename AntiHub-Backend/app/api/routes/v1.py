@@ -18,12 +18,13 @@ from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_flexible import get_user_flexible
-from app.api.deps import get_plugin_api_service, get_db_session, get_redis
+from app.api.deps import get_plugin_api_service, get_qwen_api_service, get_db_session, get_redis
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService, UpstreamAPIError
 from app.services.codex_service import CodexService
 from app.services.gemini_cli_api_service import GeminiCLIAPIService, GeminiCLIModelCooldownError
+from app.services.qwen_api_service import QwenAPIService
 from app.services.zai_tts_service import ZaiTTSService
 from app.services.zai_image_service import ZaiImageService
 from app.services.anthropic_adapter import AnthropicAdapter
@@ -1146,13 +1147,14 @@ async def responses_compact(
 @router.post(
     "/chat/completions",
     summary="聊天补全",
-    description="使用plug-in-api进行聊天补全（OpenAI兼容）。根据API key的config_type自动选择Antigravity / Kiro / Qwen配置"
+    description="在 Backend 内选择上游并进行聊天补全（OpenAI兼容）。根据 API key 的 config_type 或 X-Api-Type 自动选择 Antigravity / Kiro / Qwen / Codex 等配置。"
 )
 async def chat_completions(
     request: ChatCompletionRequest,
     raw_request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
     codex_service: CodexService = Depends(get_codex_service),
     gemini_cli_service: GeminiCLIAPIService = Depends(get_gemini_cli_api_service),
@@ -1169,7 +1171,7 @@ async def chat_completions(
     - 使用JWT token时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置（antigravity/kiro/qwen）
     - Kiro配置需要beta权限（qwen不需要）
     
-    我们使用用户对应的plug-in key调用plug-in-api
+    我们在 Backend 内部按渠道选择上游并转发（逐步移除对 AntiHub-plugin 运行时的依赖）
     """
     start_time = time.monotonic()
     endpoint = raw_request.url.path
@@ -1188,6 +1190,7 @@ async def chat_completions(
     use_kiro = effective_config_type == "kiro"
     use_codex = effective_config_type == "codex"
     use_gemini_cli = effective_config_type == "gemini-cli"
+    use_qwen = effective_config_type == "qwen"
 
     if _is_local_image_model(model_name):
         if effective_config_type != "zai-image":
@@ -1587,13 +1590,17 @@ async def chat_completions(
                             else:
                                 tracker.feed(str(chunk).encode("utf-8", errors="replace"))
                             yield chunk
-                    else:
-                        async for chunk in antigravity_service.proxy_stream_request(
+                    elif use_qwen:
+                        async for chunk in qwen_service.openai_chat_completions_stream(
                             user_id=current_user.id,
-                            method="POST",
-                            path="/v1/chat/completions",
-                            json_data=request_json,
-                            extra_headers=extra_headers if extra_headers else None,
+                            request_data=request_json,
+                        ):
+                            tracker.feed(chunk)
+                            yield chunk
+                    else:
+                        async for chunk in antigravity_service.openai_chat_completions_stream(
+                            user_id=current_user.id,
+                            request_data=request_json,
                         ):
                             tracker.feed(chunk)
                             yield chunk
@@ -1663,13 +1670,15 @@ async def chat_completions(
                 user_id=current_user.id,
                 request_data=request_json,
             )
-        else:
-            openai_stream = antigravity_service.proxy_stream_request(
+        elif use_qwen:
+            openai_stream = qwen_service.openai_chat_completions_stream(
                 user_id=current_user.id,
-                method="POST",
-                path="/v1/chat/completions",
-                json_data=request_json,
-                extra_headers=extra_headers if extra_headers else None,
+                request_data=request_json,
+            )
+        else:
+            openai_stream = antigravity_service.openai_chat_completions_stream(
+                user_id=current_user.id,
+                request_data=request_json,
             )
 
         tracker = SSEUsageTracker()

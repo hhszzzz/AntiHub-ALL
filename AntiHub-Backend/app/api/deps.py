@@ -13,6 +13,7 @@ from app.cache import get_redis_client, RedisClient
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
 from app.services.plugin_api_service import PluginAPIService
+from app.services.qwen_api_service import QwenAPIService
 from app.models.user import User
 from app.repositories.api_key_repository import APIKeyRepository
 from app.repositories.user_repository import UserRepository
@@ -122,6 +123,19 @@ async def get_plugin_api_service(
         PluginAPIService: Plug-in API服务实例
     """
     return PluginAPIService(db, redis)
+
+
+async def get_qwen_api_service(
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
+) -> QwenAPIService:
+    """
+    获取 Qwen API 服务（已合并到 Backend）
+
+    Returns:
+        QwenAPIService: Qwen API 服务实例
+    """
+    return QwenAPIService(db, redis)
 
 
 # ==================== 认证依赖 ====================

@@ -1,62 +1,60 @@
 """
-Qwen 账号管理 API 路由
+Qwen 账号管理 API 路由（已合并到 Backend）
 
-设计：
-- 账号数据存储在 AntiHub-plugin（Node 服务）的数据库中；
-- 后端仅负责鉴权、转发请求、以及把错误信息透传给前端。
+说明：
+- 账号数据存储在 Backend DB（qwen_accounts）
+- OAuth Device Flow 的 state 存储在 Redis，前端通过轮询 /oauth/status 驱动完成登录
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-import httpx
+from __future__ import annotations
 
-from app.api.deps import get_current_user, get_plugin_api_service
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db_session, get_redis
+from app.cache import RedisClient
 from app.models.user import User
-from app.services.plugin_api_service import PluginAPIService
 from app.schemas.qwen import (
     QwenAccountImportRequest,
-    QwenAccountUpdateStatusRequest,
     QwenAccountUpdateNameRequest,
+    QwenAccountUpdateStatusRequest,
     QwenOAuthAuthorizeRequest,
 )
+from app.services.qwen_api_service import QwenAPIError, QwenAPIService
 
 
 router = APIRouter(prefix="/api/qwen", tags=["Qwen账号管理"])
 
 
-def _raise_upstream_http_error(e: httpx.HTTPStatusError):
-    error_data = getattr(e, "response_data", {"detail": str(e)})
-    if isinstance(error_data, dict):
-        detail = error_data.get("detail") or error_data.get("error") or error_data
-    else:
-        detail = error_data
-    raise HTTPException(status_code=e.response.status_code, detail=detail)
+def get_qwen_api_service(
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
+) -> QwenAPIService:
+    return QwenAPIService(db, redis)
+
+
+def _raise_qwen_api_error(e: QwenAPIError) -> None:
+    raise HTTPException(status_code=int(getattr(e, "status_code", 400)), detail=str(e))
 
 
 @router.post(
     "/oauth/authorize",
     summary="生成 Qwen OAuth 登录链接",
-    description="使用 Qwen OAuth Device Flow 生成授权链接，并由 plug-in 在后台轮询完成登录后落库。",
+    description="使用 Qwen OAuth Device Flow 生成授权链接，前端轮询 /oauth/status 完成落库。",
 )
 async def qwen_oauth_authorize(
     request: QwenOAuthAuthorizeRequest,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        if request.is_shared not in (0, 1):
-            raise ValueError("is_shared 必须是 0 或 1")
-        result = await service.proxy_request(
+        return await service.oauth_authorize(
             user_id=current_user.id,
-            method="POST",
-            path="/api/qwen/oauth/authorize",
-            json_data={
-                "is_shared": request.is_shared,
-                "account_name": request.account_name,
-            },
+            is_shared=request.is_shared,
+            account_name=request.account_name,
         )
-        return result
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -69,23 +67,16 @@ async def qwen_oauth_authorize(
 @router.get(
     "/oauth/status/{state}",
     summary="轮询 Qwen OAuth 登录状态",
-    description="轮询 plug-in 内部的 Qwen OAuth 登录状态，不返回敏感 token。",
+    description="轮询 Qwen OAuth 登录状态，不返回敏感 token。",
 )
 async def qwen_oauth_status(
     state: str,
-    current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        if not state or not state.strip():
-            raise ValueError("state 不能为空")
-        return await service.proxy_request(
-            user_id=current_user.id,
-            method="GET",
-            path=f"/api/qwen/oauth/status/{state.strip()}",
-        )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+        return await service.oauth_status(state=state)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -98,29 +89,22 @@ async def qwen_oauth_status(
 @router.post(
     "/accounts/import",
     summary="导入 QwenCli JSON",
-    description="将 QwenCli 导出的 JSON 凭证导入到 plug-in 数据库中",
+    description="将 QwenCli 导出的 JSON 凭证导入到 Backend 数据库中",
 )
 async def import_qwen_account(
     request: QwenAccountImportRequest,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        if request.is_shared not in (0, 1):
-            raise ValueError("is_shared 必须是 0 或 1")
-        result = await service.proxy_request(
+        return await service.import_account(
             user_id=current_user.id,
-            method="POST",
-            path="/api/qwen/accounts/import",
-            json_data={
-                "is_shared": request.is_shared,
-                "credential_json": request.credential_json,
-                "account_name": request.account_name,
-            },
+            is_shared=request.is_shared,
+            credential_json=request.credential_json,
+            account_name=request.account_name,
         )
-        return result
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -137,16 +121,10 @@ async def import_qwen_account(
 )
 async def list_qwen_accounts(
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        return await service.proxy_request(
-            user_id=current_user.id,
-            method="GET",
-            path="/api/qwen/accounts",
-        )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+        return await service.list_accounts(user_id=current_user.id)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -162,16 +140,12 @@ async def list_qwen_accounts(
 async def get_qwen_account(
     account_id: str,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        return await service.proxy_request(
-            user_id=current_user.id,
-            method="GET",
-            path=f"/api/qwen/accounts/{account_id}",
-        )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+        return await service.get_account(user_id=current_user.id, account_id=account_id)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -187,16 +161,12 @@ async def get_qwen_account(
 async def get_qwen_account_credentials(
     account_id: str,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        return await service.proxy_request(
-            user_id=current_user.id,
-            method="GET",
-            path=f"/api/qwen/accounts/{account_id}/credentials",
-        )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+        return await service.export_credentials(user_id=current_user.id, account_id=account_id)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -213,19 +183,16 @@ async def update_qwen_account_status(
     account_id: str,
     request: QwenAccountUpdateStatusRequest,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        if request.status not in (0, 1):
-            raise ValueError("status 必须是 0 或 1")
-        return await service.proxy_request(
+        return await service.update_account_status(
             user_id=current_user.id,
-            method="PUT",
-            path=f"/api/qwen/accounts/{account_id}/status",
-            json_data={"status": request.status},
+            account_id=account_id,
+            status=request.status,
         )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -244,19 +211,16 @@ async def update_qwen_account_name(
     account_id: str,
     request: QwenAccountUpdateNameRequest,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        if not request.account_name or not request.account_name.strip():
-            raise ValueError("account_name 不能为空")
-        return await service.proxy_request(
+        return await service.update_account_name(
             user_id=current_user.id,
-            method="PUT",
-            path=f"/api/qwen/accounts/{account_id}/name",
-            json_data={"account_name": request.account_name},
+            account_id=account_id,
+            account_name=request.account_name,
         )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
@@ -274,18 +238,15 @@ async def update_qwen_account_name(
 async def delete_qwen_account(
     account_id: str,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service),
+    service: QwenAPIService = Depends(get_qwen_api_service),
 ):
     try:
-        return await service.proxy_request(
-            user_id=current_user.id,
-            method="DELETE",
-            path=f"/api/qwen/accounts/{account_id}",
-        )
-    except httpx.HTTPStatusError as e:
-        _raise_upstream_http_error(e)
+        return await service.delete_account(user_id=current_user.id, account_id=account_id)
+    except QwenAPIError as e:
+        _raise_qwen_api_error(e)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="删除 Qwen 账号失败",
         )
+
