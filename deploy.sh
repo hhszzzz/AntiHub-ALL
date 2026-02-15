@@ -365,20 +365,16 @@ deploy() {
         sleep 2
     done
 
-    # 初始化/同步两个数据库（antihub / plugin）
-    log_info "初始化数据库（antihub / plugin）..."
+    # 初始化/同步数据库（antihub；可选旧 plugin DB）
+    log_info "初始化数据库（antihub）..."
     POSTGRES_USER_ENV=$(grep "^POSTGRES_USER=" .env | cut -d'=' -f2 || echo "antihub")
     POSTGRES_PASSWORD_ENV=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- || echo "please-change-me")
     POSTGRES_DB_ENV=$(grep "^POSTGRES_DB=" .env | cut -d'=' -f2 || echo "antihub")
-    PLUGIN_DB_NAME_ENV=$(grep "^PLUGIN_DB_NAME=" .env | cut -d'=' -f2 || echo "antigravity")
-    PLUGIN_DB_USER_ENV=$(grep "^PLUGIN_DB_USER=" .env | cut -d'=' -f2 || echo "$POSTGRES_USER_ENV")
-    PLUGIN_DB_PASSWORD_ENV=$(grep "^PLUGIN_DB_PASSWORD=" .env | cut -d'=' -f2- || echo "$POSTGRES_PASSWORD_ENV")
 
     compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
         -U "$POSTGRES_USER_ENV" -d postgres \
         -v su_user="$POSTGRES_USER_ENV" -v su_pass="$POSTGRES_PASSWORD_ENV" \
-        -v main_db="$POSTGRES_DB_ENV" \
-        -v plugin_db="$PLUGIN_DB_NAME_ENV" -v plugin_user="$PLUGIN_DB_USER_ENV" -v plugin_pass="$PLUGIN_DB_PASSWORD_ENV" <<-'EOSQL'
+        -v main_db="$POSTGRES_DB_ENV" <<-'EOSQL'
 SELECT format('ALTER USER %I WITH PASSWORD %L', :'su_user', :'su_pass') \gexec
 
 SELECT format('CREATE DATABASE %I OWNER %I', :'main_db', :'su_user')
@@ -386,7 +382,35 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'main_db') \gexec
 
 SELECT format('ALTER DATABASE %I OWNER TO %I', :'main_db', :'su_user')
 WHERE EXISTS (SELECT 1 FROM pg_database WHERE datname = :'main_db') \gexec
+EOSQL
 
+    PLUGIN_DB_INIT_ENABLED_ENV=$(grep "^PLUGIN_DB_INIT_ENABLED=" .env | cut -d'=' -f2- || echo "false")
+    PLUGIN_DB_INIT_ENABLED_ENV=${PLUGIN_DB_INIT_ENABLED_ENV//$'\r'/}
+    case "$PLUGIN_DB_INIT_ENABLED_ENV" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Yy]|[Oo][Nn])
+            PLUGIN_DB_INIT_ENABLED_ENV=true
+            ;;
+        *)
+            PLUGIN_DB_INIT_ENABLED_ENV=false
+            ;;
+    esac
+
+    if [ "$PLUGIN_DB_INIT_ENABLED_ENV" = "true" ]; then
+        log_info "初始化旧 plugin DB（迁移期可选）..."
+
+        PLUGIN_DB_NAME_ENV=$(grep "^PLUGIN_DB_NAME=" .env | cut -d'=' -f2 || echo "antigravity")
+        PLUGIN_DB_USER_ENV=$(grep "^PLUGIN_DB_USER=" .env | cut -d'=' -f2 || echo "$POSTGRES_USER_ENV")
+        PLUGIN_DB_PASSWORD_ENV=$(grep "^PLUGIN_DB_PASSWORD=" .env | cut -d'=' -f2- || echo "$POSTGRES_PASSWORD_ENV")
+
+        if [ "$PLUGIN_DB_USER_ENV" = "$POSTGRES_USER_ENV" ] && [ "$PLUGIN_DB_PASSWORD_ENV" != "$POSTGRES_PASSWORD_ENV" ]; then
+            log_error "配置冲突：PLUGIN_DB_USER 与 POSTGRES_USER 相同，但 PLUGIN_DB_PASSWORD 与 POSTGRES_PASSWORD 不一致（同一用户不可能有两套密码）"
+            exit 1
+        fi
+
+        compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
+            -U "$POSTGRES_USER_ENV" -d postgres \
+            -v su_user="$POSTGRES_USER_ENV" -v su_pass="$POSTGRES_PASSWORD_ENV" \
+            -v plugin_db="$PLUGIN_DB_NAME_ENV" -v plugin_user="$PLUGIN_DB_USER_ENV" -v plugin_pass="$PLUGIN_DB_PASSWORD_ENV" <<-'EOSQL'
 SELECT format('CREATE USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass')
 WHERE :'plugin_user' <> :'su_user'
   AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'plugin_user') \gexec
@@ -404,18 +428,21 @@ WHERE EXISTS (SELECT 1 FROM pg_database WHERE datname = :'plugin_db') \gexec
 SELECT format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', :'plugin_db', :'plugin_user') \gexec
 EOSQL
 
-    compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
-        -U "$POSTGRES_USER_ENV" -d "$PLUGIN_DB_NAME_ENV" \
-        -v plugin_user="$PLUGIN_DB_USER_ENV" <<-'EOSQL'
+        compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
+            -U "$POSTGRES_USER_ENV" -d "$PLUGIN_DB_NAME_ENV" \
+            -v plugin_user="$PLUGIN_DB_USER_ENV" <<-'EOSQL'
 SELECT format('GRANT ALL ON SCHEMA public TO %I', :'plugin_user') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I', :'plugin_user') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I', :'plugin_user') \gexec
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 EOSQL
+    else
+        log_info "跳过旧 plugin DB 初始化（PLUGIN_DB_INIT_ENABLED!=true）"
+    fi
 
-    log_info "启动主服务（plugin/backend/web）..."
-    compose up -d plugin backend web
+    log_info "启动主服务（backend/web）..."
+    compose up -d backend web
 
     # 检查服务状态
     log_info "检查服务状态..."
@@ -475,7 +502,7 @@ EOSQL
 }
 
 upgrade() {
-    log_info "开始升级 AntiHub-ALL（仅升级 web/backend/plugin，不操作数据库）..."
+    log_info "开始升级 AntiHub-ALL（仅升级 web/backend，不操作数据库）..."
     echo ""
 
     fix_permissions
@@ -492,18 +519,18 @@ upgrade() {
     cp .env "$ENV_BACKUP_FILE"
     log_info "已备份 .env 到 ${ENV_BACKUP_FILE}"
 
-    log_info "拉取最新 Docker 镜像（仅 web/backend/plugin）..."
-    compose pull web backend plugin
+    log_info "拉取最新 Docker 镜像（仅 web/backend）..."
+    compose pull web backend
 
-    log_info "重启服务（仅 web/backend/plugin），不重启 postgres/redis..."
-    compose up -d --no-deps web backend plugin
+    log_info "重启服务（仅 web/backend），不重启 postgres/redis..."
+    compose up -d --no-deps web backend
 
     log_info "检查服务状态..."
     sleep 3
 
-    FAILED_SERVICES=$(compose ps --services --filter "status=exited" | grep -E "^(web|backend|plugin)$" || true)
+    FAILED_SERVICES=$(compose ps --services --filter "status=exited" | grep -E "^(web|backend)$" || true)
     if [ -n "$FAILED_SERVICES" ]; then
-        log_error "以下服务启动失败（web/backend/plugin）："
+        log_error "以下服务启动失败（web/backend）："
         echo "$FAILED_SERVICES"
         log_info "查看日志："
         compose logs --tail=80
@@ -558,7 +585,7 @@ show_menu() {
     echo ""
     log_info "请选择要执行的操作："
     echo "  1) 一键部署（首次部署/重装）"
-    echo "  2) 升级（仅升级 web/backend/plugin，不操作数据库）"
+    echo "  2) 升级（仅升级 web/backend，不操作数据库）"
     echo "  3) 卸载（停止并删除容器，可选删除数据卷）"
     echo "  0) 退出"
     echo ""
@@ -589,7 +616,7 @@ case "${1:-}" in
     -h|--help|help)
         echo "Usage: ./deploy.sh [deploy|upgrade|uninstall]"
         echo "  deploy     一键部署（首次部署/重装）"
-        echo "  upgrade    升级（仅升级 web/backend/plugin，不操作数据库）"
+        echo "  upgrade    升级（仅升级 web/backend，不操作数据库）"
         echo "  uninstall  卸载（停止并删除容器，可选删除数据卷）"
         echo ""
         echo "不传参数会进入交互菜单。"
