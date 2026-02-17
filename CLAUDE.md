@@ -91,10 +91,20 @@ app/
 
 ## 代码规范
 
-- **TypeScript**: 组件用 PascalCase，变量/函数用 camelCase
+- **TypeScript**: 组件用 PascalCase，变量/函数用 camelCase；运行 `pnpm lint` 检查
 - **Python**: 4 空格缩进，异步路由保持非阻塞，类型注解
 - **Go**: 运行 `gofmt` 格式化
 - **提交信息**: `<type>: <summary>`（feat:, fix:, !表示破坏性变更）
+- **模块独立性**: 保持改动范围在所修改的模块内，遵循该文件夹的现有模式
+
+## 生成的工件
+
+以下文件不应该被提交（各模块的 `.gitignore` 已配置）：
+- `.next/` — Next.js 构建输出
+- `node_modules/` — npm 依赖
+- `.venv/` — Python 虚拟环境
+- `__pycache__/` — Python 缓存
+- `AntiHook/` 中的二进制文件
 
 ## 环境变量
 
@@ -107,11 +117,23 @@ app/
 - `CODEX_SUPPORTED_MODELS` — 覆盖 Codex 模型列表
 - `CODEX_PROXY_URL` — Codex 出站代理
 
+**添加新环境变量时**，需要同时更新对应的 `*.example` 文件并文档化默认值。
+
 ## 测试
 
 目前没有统一的测试运行器。验证方式：
 1. Docker 冒烟测试：`docker compose up`
 2. 手动验证受影响的 UI 路由 / API 端点
+
+## 提交和 PR 指南
+
+提交信息遵循 `<type>: <summary>` 格式（常见类型：`feat:`、`fix:`；`!` 表示破坏性变更）。
+
+PR 应包含：
+- **改动说明** — 做了什么、为什么做
+- **验证方式** — 具体的验证命令和步骤
+- **UI 变更截图** — 如有前端改动，需提供截图
+- **环境变量更新** — 如添加新的环境变量，需更新 `*.example` 文件并文档化默认值
 
 ## API 文档
 
