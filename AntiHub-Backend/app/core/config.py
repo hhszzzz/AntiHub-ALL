@@ -40,18 +40,10 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = Field(default=7, description="Refresh Token 过期时间（天）")
     refresh_token_secret_key: Optional[str] = Field(default=None, description="Refresh Token 密钥（默认使用 JWT 密钥）")
     
-    # Plug-in API 配置
-    plugin_api_base_url: str = Field(
-        default="http://localhost:8045",
-        description="Plug-in API服务的基础URL"
-    )
-    plugin_api_admin_key: Optional[str] = Field(
-        None,
-        description="Plug-in API管理员密钥（用于创建用户等管理操作）"
-    )
+    # 凭证/密钥加密（Fernet key）
     plugin_api_encryption_key: str = Field(
         ...,
-        description="用于加密存储用户API密钥的密钥"
+        description="Fernet 加密密钥：用于加密存储各类上游凭证/API Key（不要随意更换，否则历史密文无法解密）"
     )
 
     # Kiro 配置（可选）

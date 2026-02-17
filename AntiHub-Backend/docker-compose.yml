@@ -30,9 +30,7 @@ services:
       # Refresh Token
       REFRESH_TOKEN_EXPIRE_DAYS: 7
 
-      # 插件 API 配置
-      PLUGIN_API_BASE_URL: http://localhost:8045
-      PLUGIN_API_ADMIN_KEY: sk-admin-your-admin-key-here
+      # Encryption Key (Fernet)
       PLUGIN_API_ENCRYPTION_KEY: your-encryption-key-here-min-32-chars
 
       # Kiro（可选）
