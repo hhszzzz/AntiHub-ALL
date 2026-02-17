@@ -1,9 +1,10 @@
 """
-Plugin DB → Backend DB 迁移服务（迁移期）
+Plugin DB → Backend DB 迁移服务（升级/迁移期）
 
 目标：
-- 在开关开启时，将 AntiHub-plugin DB 的账号数据导入到 Backend（antigravity_* / kiro_* 等）
-- 使用 Redis 分布式锁避免多实例重复执行；并在迁移失败时阻止启动
+- 当配置了 PLUGIN_API_BASE_URL（指向“迁移助手/Env Exporter”服务）时，自动从旧 plugin DB 导入账号数据到 Backend（antigravity_* / kiro_* 等）
+- 使用数据库状态表（plugin_db_migration_states）记录迁移是否完成，避免每次启动重复迁移
+- 多实例并发启动时只允许一个实例执行迁移，其余实例等待结果；失败时阻止启动以避免半迁移状态
 """
 
 from __future__ import annotations
@@ -11,27 +12,42 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import select, text
+import httpx
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.sql import func
 
-from app.cache import RedisClient, get_redis_client
 from app.core.config import get_settings
 from app.models.antigravity_account import AntigravityAccount
 from app.models.antigravity_model_quota import AntigravityModelQuota
 from app.models.kiro_account import KiroAccount
 from app.models.kiro_subscription_model import KiroSubscriptionModel
 from app.models.plugin_api_key import PluginAPIKey
+from app.models.plugin_db_migration_state import PluginDbMigrationState
 from app.models.plugin_user_mapping import PluginUserMapping
 from app.utils.encryption import decrypt_api_key, encrypt_api_key
 
 logger = logging.getLogger(__name__)
+
+_MIGRATION_KEY = "plugin_db_to_backend_v2"
+_PLUGIN_ENV_ENDPOINT_PATH = "/api/migration/db-env"
+
+_DEFAULT_WAIT_TIMEOUT_SECONDS = 600
+_DEFAULT_POLL_INTERVAL_SECONDS = 2.0
+_DEFAULT_PLUGIN_ENV_HTTP_TIMEOUT_SECONDS = 10.0
+
+_MIGRATION_STATUS_PENDING = "pending"
+_MIGRATION_STATUS_RUNNING = "running"
+_MIGRATION_STATUS_DONE = "done"
+_MIGRATION_STATUS_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -62,88 +78,203 @@ def _naive_dt_to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
 async def ensure_plugin_db_migrated(db: AsyncSession) -> None:
     """
-    在开关开启时确保迁移执行完成。
+    在配置了 PLUGIN_API_BASE_URL 时确保迁移执行完成。
 
     - 成功：继续启动
-    - 失败：抛异常阻止启动
+    - 失败：抛异常阻止启动（避免半迁移状态）
     """
     settings = get_settings()
-    if not settings.plugin_db_migration_enabled:
+    plugin_api_base_url = (settings.plugin_api_base_url or "").strip().rstrip("/")
+    if not plugin_api_base_url:
+        # 新部署：不配置该项，直接跳过迁移逻辑
         return
 
-    plugin_db_url = (settings.plugin_migration_database_url or "").strip()
-    if not plugin_db_url:
-        raise RuntimeError("PLUGIN_MIGRATION_DATABASE_URL is required when PLUGIN_DB_MIGRATION_ENABLED=true")
+    wait_timeout = int(getattr(settings, "plugin_db_migration_wait_timeout_seconds", 0) or 0)
+    if wait_timeout <= 0:
+        wait_timeout = _DEFAULT_WAIT_TIMEOUT_SECONDS
 
-    redis = get_redis_client()
+    # 确保状态行存在（幂等）
+    async with db.begin():
+        stmt = (
+            pg_insert(PluginDbMigrationState)
+            .values(key=_MIGRATION_KEY, status=_MIGRATION_STATUS_PENDING)
+            .on_conflict_do_nothing(index_elements=[PluginDbMigrationState.key])
+        )
+        await db.execute(stmt)
 
-    # v2: 新增 Kiro 相关表迁移（public.kiro_accounts / public.kiro_subscription_models）
-    version = "v2"
-    done_key = f"migration:plugin_db_to_backend:done:{version}"
-    lock_key = f"migration:plugin_db_to_backend:lock:{version}"
-    lock_ttl = int(settings.plugin_db_migration_lock_ttl_seconds or 3600)
-    wait_timeout = int(settings.plugin_db_migration_wait_timeout_seconds or 600)
-
-    if await redis.exists(done_key):
-        logger.info("[migration] plugin DB migration already done: %s", done_key)
+    state = await _get_migration_state(db)
+    if state is not None and state.status == _MIGRATION_STATUS_DONE:
+        logger.info("[migration] plugin DB migration already done: key=%s", _MIGRATION_KEY)
         return
 
-    lock_value = str(uuid4())
-    acquired = await _redis_set_if_not_exists(redis, lock_key, lock_value, expire=lock_ttl)
+    now = datetime.now(timezone.utc)
+    instance_id = str(uuid4())
+
+    acquired = await _try_claim_migration(db=db, now=now, instance_id=instance_id)
 
     if acquired:
-        logger.info("[migration] acquired lock: %s", lock_key)
         engine: Optional[AsyncEngine] = None
         try:
+            raw_token = (settings.plugin_env_export_token or "").strip()
+            if not raw_token:
+                raw_token = (os.getenv("PLUGIN_ADMIN_API_KEY") or "").strip()
+            if not raw_token:
+                raw_token = (os.getenv("PLUGIN_API_ADMIN_KEY") or "").strip()
+
+            plugin_db_url = await _resolve_plugin_db_url(
+                plugin_api_base_url=plugin_api_base_url,
+                plugin_env_export_token=raw_token or None,
+            )
+            logger.info(
+                "[migration] starting plugin DB migration: key=%s plugin_api_base_url=%s",
+                _MIGRATION_KEY,
+                plugin_api_base_url,
+            )
             engine = create_async_engine(plugin_db_url, pool_pre_ping=True)
             await _run_migration(db=db, plugin_engine=engine)
-            await redis.set(done_key, "1")
-            logger.info("[migration] done marker set: %s", done_key)
+
+            async with db.begin():
+                await db.execute(
+                    update(PluginDbMigrationState)
+                    .where(PluginDbMigrationState.key == _MIGRATION_KEY)
+                    .values(
+                        status=_MIGRATION_STATUS_DONE,
+                        finished_at=datetime.now(timezone.utc),
+                        last_error=None,
+                        updated_at=func.now(),
+                    )
+                )
+
+            logger.info("[migration] plugin DB migration done: key=%s", _MIGRATION_KEY)
+            return
         except Exception as e:
+            async with db.begin():
+                await db.execute(
+                    update(PluginDbMigrationState)
+                    .where(PluginDbMigrationState.key == _MIGRATION_KEY)
+                    .values(
+                        status=_MIGRATION_STATUS_FAILED,
+                        finished_at=datetime.now(timezone.utc),
+                        last_error=f"{type(e).__name__}: {str(e)}",
+                        updated_at=func.now(),
+                    )
+                )
             logger.error("[migration] plugin DB migration failed: %s: %s", type(e).__name__, str(e), exc_info=True)
             raise
         finally:
-            try:
-                await redis.delete(lock_key)
-            except Exception:
-                pass
             if engine is not None:
                 try:
                     await engine.dispose()
                 except Exception:
                     pass
-        return
 
-    logger.info("[migration] lock not acquired, waiting for done marker: %s", done_key)
-    interval = 2.0
+    logger.info("[migration] migration already running in another instance; waiting: key=%s", _MIGRATION_KEY)
+    await _wait_for_migration_done(db=db, timeout_seconds=wait_timeout)
+
+
+async def _get_migration_state(db: AsyncSession) -> Optional[PluginDbMigrationState]:
+    result = await db.execute(
+        select(PluginDbMigrationState)
+        .where(PluginDbMigrationState.key == _MIGRATION_KEY)
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _try_claim_migration(*, db: AsyncSession, now: datetime, instance_id: str) -> bool:
+    # 原子更新：pending/failed -> running（用于多实例并发启动时只跑一次迁移）
+    async with db.begin():
+        result = await db.execute(
+            update(PluginDbMigrationState)
+            .where(
+                PluginDbMigrationState.key == _MIGRATION_KEY,
+                PluginDbMigrationState.status.in_([_MIGRATION_STATUS_PENDING, _MIGRATION_STATUS_FAILED]),
+            )
+            .values(
+                status=_MIGRATION_STATUS_RUNNING,
+                started_at=now,
+                finished_at=None,
+                last_error=None,
+                updated_at=func.now(),
+            )
+        )
+
+    claimed = bool(result.rowcount and result.rowcount > 0)
+    if claimed:
+        logger.info("[migration] claimed migration: key=%s instance_id=%s", _MIGRATION_KEY, instance_id)
+    return claimed
+
+
+async def _wait_for_migration_done(*, db: AsyncSession, timeout_seconds: int) -> None:
+    interval = _DEFAULT_POLL_INTERVAL_SECONDS
     waited = 0.0
-    while waited < wait_timeout:
-        if await redis.exists(done_key):
-            logger.info("[migration] done marker detected: %s", done_key)
+    while waited < timeout_seconds:
+        state = await _get_migration_state(db)
+        if state is not None and state.status == _MIGRATION_STATUS_DONE:
+            logger.info("[migration] done state detected: key=%s", _MIGRATION_KEY)
             return
+        if state is not None and state.status == _MIGRATION_STATUS_FAILED:
+            raise RuntimeError(
+                "plugin DB migration failed in another instance. "
+                f"key={_MIGRATION_KEY} last_error={state.last_error or ''}"
+            )
         await asyncio.sleep(interval)
         waited += interval
 
     raise RuntimeError(
-        "PLUGIN_DB_MIGRATION_ENABLED=true but migration did not complete within wait timeout "
-        f"({wait_timeout}s). lock_key={lock_key} done_key={done_key}"
+        "plugin DB migration did not complete within wait timeout "
+        f"({timeout_seconds}s). key={_MIGRATION_KEY}"
     )
 
 
-async def _redis_set_if_not_exists(redis: RedisClient, key: str, value: str, *, expire: int) -> bool:
-    # 优先使用 wrapper 提供的方法（若未来扩展），否则退化为直接调用底层 redis 客户端
-    method = getattr(redis, "set_if_not_exists", None)
-    if callable(method):
-        return bool(await method(key, value, expire=expire))
+async def _resolve_plugin_db_url(*, plugin_api_base_url: str, plugin_env_export_token: Optional[str]) -> str:
+    url = f"{plugin_api_base_url}{_PLUGIN_ENV_ENDPOINT_PATH}"
+    headers: Dict[str, str] = {}
+    if plugin_env_export_token:
+        headers["X-Migration-Token"] = plugin_env_export_token
 
-    # fallback: 使用 set + nx（redis-py 支持）
-    raw = getattr(redis, "_client", None)
-    if raw is None:
-        await redis.connect()
-        raw = getattr(redis, "_client", None)
-    if raw is None:
-        raise RuntimeError("redis client not initialized")
-    return bool(await raw.set(key, value, ex=expire, nx=True))
+    async with httpx.AsyncClient(timeout=_DEFAULT_PLUGIN_ENV_HTTP_TIMEOUT_SECONDS) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    def _get(name: str) -> Optional[str]:
+        v = data.get(name)
+        if v is None:
+            v = data.get(name.lower())
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    host = _get("DB_HOST")
+    port_raw = _get("DB_PORT") or "5432"
+    name = _get("DB_NAME")
+    user = _get("DB_USER")
+    password = _get("DB_PASSWORD")
+
+    missing = [k for k, v in [("DB_HOST", host), ("DB_NAME", name), ("DB_USER", user), ("DB_PASSWORD", password)] if not v]
+    if missing:
+        raise RuntimeError(
+            "plugin env exporter did not return required fields: "
+            + ", ".join(missing)
+            + f". url={url}"
+        )
+
+    try:
+        port = int(port_raw)
+    except Exception:
+        raise RuntimeError(f"invalid DB_PORT from plugin env exporter: {port_raw!r}. url={url}") from None
+
+    db_url = URL.create(
+        "postgresql+asyncpg",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=name,
+    )
+    return db_url.render_as_string(hide_password=False)
 
 
 async def _run_migration(*, db: AsyncSession, plugin_engine: AsyncEngine) -> None:

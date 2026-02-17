@@ -38,7 +38,7 @@ Module development (run inside each folder):
 | 层级 | 已对接服务 | 备注 |
 |------|-----------|------|
 | 后端 (AntiHub-Backend) | CodexCLI | ✅ 新服务统一对接到这里 |
-| 备注 | AntiHub-plugin | ✅ 已合并并从仓库移除（历史实现不再维护） |
+| 备注 | AntiHub-plugin | ✅ 旧 Node plugin 已合并进 Backend；`AntiHub-plugin/` 仅作为迁移助手（Env Exporter），运行时默认不部署 |
 
 ## Coding Style & Naming Conventions
 

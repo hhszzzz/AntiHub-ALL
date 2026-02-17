@@ -51,6 +51,14 @@ services:
       # 加密密钥（用于存储各类上游凭证/Key；必须是 Fernet key）
       PLUGIN_API_ENCRYPTION_KEY: ${PLUGIN_API_ENCRYPTION_KEY}
 
+      # 旧 plugin DB 自动迁移（可选）
+      # - 新部署：保持 PLUGIN_API_BASE_URL 为空即可（不会触发迁移判断）
+      # - 升级/迁移：指向 “Env Exporter” 服务（容器内通常为 http://plugin-env:8045）
+      PLUGIN_API_BASE_URL: ${PLUGIN_API_BASE_URL:-}
+      PLUGIN_ENV_EXPORT_TOKEN: ${PLUGIN_ENV_EXPORT_TOKEN:-}
+      # 兼容：如你已有旧部署的 PLUGIN_ADMIN_API_KEY，也可复用作为迁移助手鉴权 Token
+      PLUGIN_ADMIN_API_KEY: ${PLUGIN_ADMIN_API_KEY:-}
+
       # 需要你自己配置的密钥/回调（外部可见）
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       JWT_ALGORITHM: HS256

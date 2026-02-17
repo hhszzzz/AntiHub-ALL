@@ -61,7 +61,7 @@ go build ./...
 | 层级 | 已对接服务 | 备注 |
 |------|-----------|------|
 | 后端 (AntiHub-Backend) | CodexCLI, Gemini | 新服务统一对接到这里 |
-| 备注 | AntiHub-plugin | 已合并并从仓库移除（历史实现不再维护） |
+| 备注 | AntiHub-plugin | 旧 Node plugin 运行时能力已合并进 Backend；`AntiHub-plugin/` 仅作为迁移助手（Env Exporter），默认不部署 |
 
 ### 后端架构 (FastAPI)
 ```
@@ -87,7 +87,7 @@ app/
 
 ### 说明：AntiHub-plugin
 
-历史上仓库包含 `AntiHub-plugin/`（Node 代理/插件服务），用于承载部分上游对接逻辑；当前已迁移并从仓库移除，运行时默认不再部署 plugin。
+历史上仓库包含 `AntiHub-plugin/`（Node 代理/插件服务），用于承载部分上游对接逻辑；其**运行时能力**已迁移并合并至 `AntiHub-Backend/`。当前仓库保留一个最小化的 `AntiHub-plugin/`（Env Exporter）用于升级/迁移期向 Backend 提供旧 DB 连接信息，默认不部署。
 
 ## 代码规范
 

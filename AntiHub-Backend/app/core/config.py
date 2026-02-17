@@ -60,22 +60,22 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Plugin DB → Backend DB 迁移（可选）
-    plugin_db_migration_enabled: bool = Field(
-        default=False,
-        description="是否在启动时执行 plugin DB → Backend DB 迁移（默认关闭）",
-    )
-    plugin_migration_database_url: Optional[str] = Field(
+    # 旧 plugin DB → Backend DB 自动迁移（可选）
+    #
+    # 新部署：不要配置 PLUGIN_API_BASE_URL（留空），后端会直接启动，不会触发迁移逻辑。
+    # 升级/迁移：配置 PLUGIN_API_BASE_URL 指向 “迁移助手(Plugin env exporter)” 服务，
+    #          后端启动时会自动拉取 DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD 并迁移。
+    plugin_api_base_url: Optional[str] = Field(
         default=None,
-        description="plugin DB 连接 URL（仅迁移期使用）",
+        description="Plugin env exporter API Base URL（配置后启用启动期迁移）",
     )
-    plugin_db_migration_lock_ttl_seconds: int = Field(
-        default=3600,
-        description="迁移分布式锁 TTL（秒）",
+    plugin_env_export_token: Optional[str] = Field(
+        default=None,
+        description="Plugin env exporter 鉴权 Token（可选，对应请求头 X-Migration-Token）",
     )
     plugin_db_migration_wait_timeout_seconds: int = Field(
         default=600,
-        description="未抢到锁时等待迁移完成的超时时间（秒）",
+        description="检测到迁移进行中时等待迁移完成的超时时间（秒）",
     )
 
     # ZAI TTS 配置

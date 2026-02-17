@@ -20,17 +20,18 @@
 原项目地址：
 - https://github.com/AntiHub-Project/AntiHub
 - https://github.com/AntiHub-Project/Backend
-- （历史）https://github.com/AntiHub-Project/Antigv-plugin（本仓库已将 plugin 能力合并进 Backend，不再包含/构建 `AntiHub-plugin`）
+- （历史）https://github.com/AntiHub-Project/Antigv-plugin（本仓库已将 plugin **运行时能力**合并进 Backend；`AntiHub-plugin/` 仅保留为“迁移助手”，不作为运行时服务部署）
 
-这个仓库把 `AntiHub`（前端）与 `AntiHub-Backend`（后端）统一成一套 `docker compose` 部署：运行时只需启动 **web + backend**（以及可选的 PostgreSQL / Redis）。历史上的 `AntiHub-plugin`（插件服务）能力已合并进 Backend，本仓库也已移除 `AntiHub-plugin/` 目录与相关 CI 打包。
+这个仓库把 `AntiHub`（前端）与 `AntiHub-Backend`（后端）统一成一套 `docker compose` 部署：运行时只需启动 **web + backend**（以及可选的 PostgreSQL / Redis）。历史上的 `AntiHub-plugin`（插件服务）运行时能力已合并进 Backend；仓库仅保留一个最小化的 `AntiHub-plugin/`（Env Exporter）用于**升级/迁移**时自动读取旧 DB 连接信息。
 
 默认 `docker-compose.yml` 自带 PostgreSQL + Redis，你主要只需要配置你自己的密钥；如果你想接入外部 PG/Redis，用 `docker-compose.core.yml`（只启动 web + backend）。
 
 ## Plugin 已移除（无需部署）
 
 - 前端用量/Analytics 已切换到 Backend 的 `/api/usage/requests/*`（旧的 `/api/plugin-api/quotas/consumption` 等接口会返回 410 Gone）。
-- 运行时无需也不应直连 `AntiHub-plugin:8045`（旧形态端口）；统一通过 Backend 对外入口。
-- 如需从旧 plugin DB 导入数据，可启用 Backend 启动期迁移开关（默认关闭），详见：`4-docs/plugin-db-to-backend-migration.md`、`4-docs/mpb-080-acceptance-runbook.md`。
+- 日常运行无需部署旧 `AntiHub-plugin`；如需迁移旧数据，临时启动迁移助手 `plugin-env`（默认端口 8045），仅供 Backend 内部访问。
+- 如需从旧 plugin DB 导入数据（升级/迁移场景），可启动迁移助手（`AntiHub-plugin/`，Env Exporter）并配置 Backend 的 `PLUGIN_API_BASE_URL`，启动期会自动迁移；详见：`4-docs/plugin-db-to-backend-migration.md`、`4-docs/mpb-080-acceptance-runbook.md`。
+- 迁移完成后建议清空 `PLUGIN_API_BASE_URL` 并停止 `plugin-env`，避免意外暴露旧 DB 连接信息。
 
 ## 注意事项
 
@@ -114,7 +115,7 @@ docker compose up -d
 ## 升级/迁移（可选）
 
 - **升级镜像**：`./deploy.sh upgrade`（仅升级 web/backend，不改数据库）
-- **从旧 plugin DB 迁移数据**（默认关闭）：在 `.env` 中设置 `PLUGIN_DB_MIGRATION_ENABLED=true` 与 `PLUGIN_MIGRATION_DATABASE_URL=...`，然后重启 backend 触发启动期迁移（详见 `4-docs/plugin-db-to-backend-migration.md`）。
+- **从旧 plugin DB 迁移数据**（可选）：启动迁移助手（见 `AntiHub-plugin/`），并在 `.env` 中设置 `PLUGIN_API_BASE_URL`（可选 `PLUGIN_ENV_EXPORT_TOKEN`；或直接复用旧部署的 `PLUGIN_ADMIN_API_KEY`），然后重启 backend 触发启动期自动迁移（详见 `4-docs/plugin-db-to-backend-migration.md`）。
 - **重要**：如果你已有数据，升级时不要随意更换 `PLUGIN_API_ENCRYPTION_KEY`，否则历史加密数据将无法解密。
 
 3) 访问前端：

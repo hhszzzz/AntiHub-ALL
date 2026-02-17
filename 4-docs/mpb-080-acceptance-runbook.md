@@ -66,9 +66,26 @@ curl -sS -i http://localhost:8000/api/plugin-api/quotas/consumption
 
 1) 准备迁移环境变量（写入 `.env`）：
 
+（可选）使用本仓库提供的迁移助手容器（`AntiHub-plugin/`）：
+
+```bash
+docker compose -f docker-compose.yml -f docker/docker-compose.plugin-env.yml up -d plugin-env
+```
+
 ```env
-PLUGIN_DB_MIGRATION_ENABLED=true
-PLUGIN_MIGRATION_DATABASE_URL=postgresql+asyncpg://<user>:<pass>@<host>:<port>/<plugin_db>
+# 指向迁移助手（Env Exporter）；留空=不触发迁移
+PLUGIN_API_BASE_URL=http://plugin-env:8045
+# 可选：与迁移助手一致（对应请求头 X-Migration-Token）
+PLUGIN_ENV_EXPORT_TOKEN=
+# 兼容：也可以直接复用旧部署的 PLUGIN_ADMIN_API_KEY（迁移助手优先使用 PLUGIN_ENV_EXPORT_TOKEN）
+PLUGIN_ADMIN_API_KEY=
+
+# 迁移助手读取的旧 DB 连接信息（仅在启用迁移助手时需要）
+#DB_HOST=postgres
+#DB_PORT=5432
+#DB_NAME=antigravity
+#DB_USER=antigravity
+#DB_PASSWORD=please-change-me
 ```
 
 2) 重启 backend（触发启动期迁移）：
@@ -81,6 +98,7 @@ docker compose logs -f backend
 期望：
 - 迁移成功（日志无 “migration failed”）
 - 数据抽样正确：能在管理后台看到对应账号/配额（或用 SQL 抽样）
+- 状态表 `plugin_db_migration_states` 中 `key=plugin_db_to_backend_v2` 的 `status=done`
 
 > 迁移应为幂等：重复执行不应产生重复数据/破坏性写操作。
 

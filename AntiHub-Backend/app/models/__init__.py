@@ -20,6 +20,7 @@ from app.models.antigravity_model_quota import AntigravityModelQuota
 from app.models.qwen_account import QwenAccount
 from app.models.kiro_account import KiroAccount
 from app.models.kiro_subscription_model import KiroSubscriptionModel
+from app.models.plugin_db_migration_state import PluginDbMigrationState
 
 __all__ = [
     "User",
@@ -40,4 +41,5 @@ __all__ = [
     "QwenAccount",
     "KiroAccount",
     "KiroSubscriptionModel",
+    "PluginDbMigrationState",
 ]
