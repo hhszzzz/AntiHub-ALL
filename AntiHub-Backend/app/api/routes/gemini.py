@@ -159,6 +159,132 @@ def _resolve_config_type(current_user: User, raw_request: Request) -> Optional[s
     return None
 
 
+def _extract_openai_model_ids(payload: Any) -> list[str]:
+    """
+    Best-effort: parse OpenAI `/v1/models`-style response:
+    {"object":"list","data":[{"id":"..."}]}
+    """
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        if not isinstance(mid, str):
+            continue
+        mid = mid.strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+    return out
+
+
+def _normalize_gemini_models(model_ids: list[str]) -> list[Dict[str, Any]]:
+    normalized: list[Dict[str, Any]] = []
+    default_methods = ["generateContent"]
+    seen: set[str] = set()
+
+    for mid in model_ids:
+        raw = str(mid or "").strip()
+        if not raw:
+            continue
+        if raw in seen:
+            continue
+        seen.add(raw)
+
+        if raw.startswith("models/"):
+            display = raw[len("models/") :]
+            name = raw
+        else:
+            display = raw
+            name = "models/" + raw
+
+        normalized.append(
+            {
+                "name": name,
+                "displayName": display,
+                "description": display,
+                "supportedGenerationMethods": default_methods,
+            }
+        )
+
+    return normalized
+
+
+@router.get(
+    "/models",
+    summary="Gemini v1beta models list",
+    description="Gemini 兼容 models 列表（参考 CLIProxyAPIPlus：返回 {models:[...]}）。支持 JWT/Bearer API key/x-goog-api-key 认证。",
+)
+async def list_gemini_models(
+    raw_request: Request,
+    current_user: User = Depends(get_user_flexible_with_goog_api_key),
+    plugin_api_service: PluginAPIService = Depends(get_plugin_api_service),
+    gemini_cli_service: GeminiCLIAPIService = Depends(get_gemini_cli_api_service),
+):
+    config_type = _resolve_config_type(current_user, raw_request)
+    ensure_spec_allowed("Gemini", config_type)
+    effective_config_type = config_type
+
+    model_ids: list[str] = []
+    if effective_config_type == "gemini-cli":
+        payload = await gemini_cli_service.openai_list_models(user_id=current_user.id)
+        model_ids = _extract_openai_model_ids(payload) or list(GeminiCLIAPIService.SUPPORTED_MODELS)
+    elif effective_config_type == "zai-image":
+        model_ids = list(LOCAL_IMAGE_MODELS)
+    elif effective_config_type == "antigravity":
+        payload = await plugin_api_service.get_models(current_user.id, config_type=effective_config_type)
+        model_ids = _extract_openai_model_ids(payload)
+
+    return {"models": _normalize_gemini_models(model_ids)}
+
+
+@router.get(
+    "/models/{model_path:path}",
+    summary="Gemini v1beta model detail",
+    description="Gemini 兼容获取单个 model 信息（best-effort）。支持传入 'gemini-2.5-pro' 或 'models/gemini-2.5-pro'。",
+)
+async def get_gemini_model(
+    model_path: str,
+    raw_request: Request,
+    current_user: User = Depends(get_user_flexible_with_goog_api_key),
+    plugin_api_service: PluginAPIService = Depends(get_plugin_api_service),
+    gemini_cli_service: GeminiCLIAPIService = Depends(get_gemini_cli_api_service),
+):
+    config_type = _resolve_config_type(current_user, raw_request)
+    ensure_spec_allowed("Gemini", config_type)
+    effective_config_type = config_type
+
+    requested = (model_path or "").strip()
+    if requested.startswith("models/"):
+        requested = requested[len("models/") :]
+
+    model_ids: list[str] = []
+    if effective_config_type == "gemini-cli":
+        payload = await gemini_cli_service.openai_list_models(user_id=current_user.id)
+        model_ids = _extract_openai_model_ids(payload) or list(GeminiCLIAPIService.SUPPORTED_MODELS)
+    elif effective_config_type == "zai-image":
+        model_ids = list(LOCAL_IMAGE_MODELS)
+    elif effective_config_type == "antigravity":
+        payload = await plugin_api_service.get_models(current_user.id, config_type=effective_config_type)
+        model_ids = _extract_openai_model_ids(payload)
+
+    normalized = _normalize_gemini_models(model_ids)
+    for m in normalized:
+        name = str(m.get("name") or "")
+        if name == f"models/{requested}" or name == requested:
+            return m
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
 @router.post(
     "/models/{model}:generateContent",
     summary="Gemini v1beta generateContent",

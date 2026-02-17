@@ -10,7 +10,7 @@
 | `OAIResponses` | `POST /v1/responses/compact` | OpenAI Responses Compact API（当前仅 codex 放行） |
 | `OAIChat` | `POST /v1/chat/completions` | OpenAI ChatCompletions（当前未做统一 spec_guard 强制拦截） |
 | `Claude` | `POST /v1/messages` | Anthropic Messages（API Key 路径会做 allowlist 校验） |
-| `Gemini` | `POST /v1beta/models/{model}:generateContent` / `streamGenerateContent` | Gemini v1beta（入口处做 allowlist 校验） |
+| `Gemini` | `GET /v1beta/models` / `GET /v1beta/models/{model}` / `POST /v1beta/models/{model}:generateContent` / `streamGenerateContent` | Gemini v1beta（入口处做 allowlist 校验） |
 
 ## 2. Spec allowlist（单一事实来源）
 
