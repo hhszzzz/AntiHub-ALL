@@ -8,3 +8,6 @@ AntiHub-scripts-main/
 .kiro/
 AntiHook/.gocache/
 GeminiCLI_对接复现指南.md
+.pnpm-store/
+.pytest_cache/
+.uv-cache/
