@@ -1,4 +1,4 @@
-const DEFAULT_DEV_API_BASE_URL = 'http://localhost:8008';
+const DEFAULT_DEV_API_BASE_URL = 'http://localhost:8000';
 const DEFAULT_PROD_PUBLIC_API_BASE_URL = '/backend';
 const DEFAULT_PROD_BACKEND_INTERNAL_URL = 'http://antihub-backend:8000';
 

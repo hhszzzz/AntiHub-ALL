@@ -26,6 +26,7 @@ class UsageLogRepository:
         start_at: Optional[datetime] = None,
         end_at: Optional[datetime] = None,
         config_type: Optional[str] = None,
+        client_app: Optional[str] = None,
         success: Optional[bool] = None,
         model_name: Optional[str] = None,
     ):
@@ -36,11 +37,24 @@ class UsageLogRepository:
             stmt = stmt.where(UsageLog.created_at <= end_at)
         if config_type:
             stmt = stmt.where(UsageLog.config_type == config_type)
+        if client_app:
+            stmt = stmt.where(UsageLog.client_app == client_app)
         if success is not None:
             stmt = stmt.where(UsageLog.success == success)
         if model_name:
             stmt = stmt.where(UsageLog.model_name == model_name)
         return stmt
+
+    async def get_log_by_id(
+        self,
+        *,
+        log_id: int,
+        user_id: int,
+    ) -> Optional[UsageLog]:
+        """根据ID获取单条日志（验证用户归属）"""
+        stmt = select(UsageLog).where(UsageLog.id == log_id, UsageLog.user_id == user_id)
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def list_logs(
         self,
@@ -51,6 +65,7 @@ class UsageLogRepository:
         start_at: Optional[datetime] = None,
         end_at: Optional[datetime] = None,
         config_type: Optional[str] = None,
+        client_app: Optional[str] = None,
         success: Optional[bool] = None,
         model_name: Optional[str] = None,
     ) -> List[UsageLog]:
@@ -61,6 +76,7 @@ class UsageLogRepository:
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
             success=success,
             model_name=model_name,
         )
@@ -75,6 +91,7 @@ class UsageLogRepository:
         start_at: Optional[datetime] = None,
         end_at: Optional[datetime] = None,
         config_type: Optional[str] = None,
+        client_app: Optional[str] = None,
         success: Optional[bool] = None,
         model_name: Optional[str] = None,
     ) -> int:
@@ -85,6 +102,7 @@ class UsageLogRepository:
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
             success=success,
             model_name=model_name,
         )
@@ -98,6 +116,7 @@ class UsageLogRepository:
         start_at: Optional[datetime] = None,
         end_at: Optional[datetime] = None,
         config_type: Optional[str] = None,
+        client_app: Optional[str] = None,
     ) -> Dict[str, Any]:
         base_stmt = select(
             func.count(UsageLog.id).label("total_requests"),
@@ -119,6 +138,7 @@ class UsageLogRepository:
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
         )
         base_result = await self.db.execute(base_stmt)
         row = base_result.one()
@@ -142,6 +162,7 @@ class UsageLogRepository:
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
         ).group_by(UsageLog.config_type)
         by_config_rows = (await self.db.execute(by_config_stmt)).all()
 
@@ -169,6 +190,7 @@ class UsageLogRepository:
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
         ).group_by(UsageLog.model_name)
         by_model_stmt = by_model_stmt.order_by(
             func.sum(UsageLog.total_tokens).desc(),

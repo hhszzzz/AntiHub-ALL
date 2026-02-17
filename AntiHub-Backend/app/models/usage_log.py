@@ -38,6 +38,15 @@ class UsageLog(Base):
     status_code = Column(Integer, nullable=True)  # 上游/处理结果状态码（流式可能为上游code）
     error_message = Column(Text, nullable=True)  # 失败原因（截断保存）
 
+    # 请求头（原始，用于调试；写入时会脱敏/截断）
+    request_headers = Column(Text, nullable=True)
+
+    # 请求体（原始JSON，用于调试）
+    request_body = Column(Text, nullable=True)  # 原始请求体JSON字符串
+
+    # 客户端标识（可选）：来自请求头 X-App，用于区分不同调用来源（例如不同 App / 环境）
+    client_app = Column(String(128), nullable=True, index=True)
+
     # TTS 扩展信息
     tts_voice_id = Column(String(128), nullable=True)  # 音色ID
     tts_account_id = Column(String(128), nullable=True)  # ZAI_USERID

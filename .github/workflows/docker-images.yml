@@ -14,26 +14,26 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  # 检测文件变更
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       web: ${{ steps.normalize.outputs.web }}
       backend: ${{ steps.normalize.outputs.backend }}
-      plugin: ${{ steps.normalize.outputs.plugin }}
+      plugin_env: ${{ steps.normalize.outputs.plugin_env }}
       tag_name: ${{ steps.tag.outputs.tag_name }}
     steps:
       - name: Force build all on manual dispatch or tag
         id: force
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
         run: |
+          echo "force_all=true" >> $GITHUB_OUTPUT
           echo "web=true" >> $GITHUB_OUTPUT
           echo "backend=true" >> $GITHUB_OUTPUT
-          echo "plugin=true" >> $GITHUB_OUTPUT
+          echo "plugin_env=true" >> $GITHUB_OUTPUT
 
       - name: Checkout
-        if: steps.force.outputs.web != 'true'
+        if: steps.force.outputs.force_all != 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -41,7 +41,7 @@ jobs:
           filter: blob:none
 
       - name: Check for changes
-        if: steps.force.outputs.web != 'true'
+        if: steps.force.outputs.force_all != 'true'
         uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -54,14 +54,14 @@ jobs:
             backend:
               - 'AntiHub-Backend/**'
               - '!AntiHub-Backend/**/*.md'
-            plugin:
+            plugin_env:
               - 'AntiHub-plugin/**'
               - '!AntiHub-plugin/**/*.md'
 
       - name: Normalize build outputs
         id: normalize
         run: |
-          # 如果 force 已设置值，使用 force 的值；否则使用 filter 的值（空则转为 false）
+          # force 有值时使用 force 输出；否则使用 filter 输出（空则转为 false）
           if [ "${{ steps.force.outputs.web }}" = "true" ]; then
             echo "web=true" >> $GITHUB_OUTPUT
           elif [ "${{ steps.filter.outputs.web }}" = "true" ]; then
@@ -78,12 +78,12 @@ jobs:
             echo "backend=false" >> $GITHUB_OUTPUT
           fi
 
-          if [ "${{ steps.force.outputs.plugin }}" = "true" ]; then
-            echo "plugin=true" >> $GITHUB_OUTPUT
-          elif [ "${{ steps.filter.outputs.plugin }}" = "true" ]; then
-            echo "plugin=true" >> $GITHUB_OUTPUT
+          if [ "${{ steps.force.outputs.plugin_env }}" = "true" ]; then
+            echo "plugin_env=true" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.filter.outputs.plugin_env }}" = "true" ]; then
+            echo "plugin_env=true" >> $GITHUB_OUTPUT
           else
-            echo "plugin=false" >> $GITHUB_OUTPUT
+            echo "plugin_env=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Extract and normalize tag name
@@ -165,7 +165,6 @@ jobs:
             LATEST_TAG="latest"
           fi
 
-          # 创建 manifest
           docker buildx imagetools create -t ${IMAGE}:${LATEST_TAG} \
             ${IMAGE}:${BUILD_TAG}-amd64 \
             ${IMAGE}:${BUILD_TAG}-arm64
@@ -174,7 +173,7 @@ jobs:
             ${IMAGE}:${BUILD_TAG}-amd64 \
             ${IMAGE}:${BUILD_TAG}-arm64
 
-          # 如果是 tag 推送，额外打版本号
+          # tag 推送额外打版本号
           if [[ "${{ needs.changes.outputs.tag_name }}" != "" ]]; then
             docker buildx imagetools create -t ${IMAGE}:${{ needs.changes.outputs.tag_name }} \
               ${IMAGE}:${BUILD_TAG}-amd64 \
@@ -264,10 +263,10 @@ jobs:
               ${IMAGE}:${BUILD_TAG}-arm64
           fi
 
-  # ============ Plugin ============
-  build-plugin:
+  # ============ Plugin Env (Migration Helper) ============
+  build-plugin-env:
     needs: changes
-    if: needs.changes.outputs.plugin == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
+    if: needs.changes.outputs.plugin_env == 'true' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
     strategy:
       fail-fast: false
       matrix:
@@ -296,7 +295,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push (plugin-${{ matrix.suffix }})
+      - name: Build & push (plugin-env-${{ matrix.suffix }})
         uses: docker/build-push-action@v6
         with:
           context: ./AntiHub-plugin
@@ -304,11 +303,11 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-plugin:build-${{ github.run_id }}-${{ matrix.suffix }}
-          cache-from: type=gha,scope=plugin-${{ matrix.suffix }}
-          cache-to: type=gha,mode=max,scope=plugin-${{ matrix.suffix }}
+          cache-from: type=gha,scope=plugin-env-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=plugin-env-${{ matrix.suffix }}
 
-  merge-plugin:
-    needs: [changes, build-plugin]
+  merge-plugin-env:
+    needs: [changes, build-plugin-env]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -321,7 +320,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and push multi-arch manifest (plugin)
+      - name: Create and push multi-arch manifest (plugin-env)
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/antihub-plugin"
           BUILD_TAG="build-${{ github.run_id }}"

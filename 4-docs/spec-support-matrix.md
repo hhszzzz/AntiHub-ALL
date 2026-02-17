@@ -10,7 +10,7 @@
 | `OAIResponses` | `POST /v1/responses/compact` | OpenAI Responses Compact API（当前仅 codex 放行） |
 | `OAIChat` | `POST /v1/chat/completions` | OpenAI ChatCompletions（当前未做统一 spec_guard 强制拦截） |
 | `Claude` | `POST /v1/messages` | Anthropic Messages（API Key 路径会做 allowlist 校验） |
-| `Gemini` | `POST /v1beta/models/{model}:generateContent` / `streamGenerateContent` | Gemini v1beta（入口处做 allowlist 校验） |
+| `Gemini` | `GET /v1beta/models` / `GET /v1beta/models/{model}` / `POST /v1beta/models/{model}:generateContent` / `streamGenerateContent` | Gemini v1beta（入口处做 allowlist 校验） |
 
 ## 2. Spec allowlist（单一事实来源）
 
@@ -55,11 +55,11 @@ cp .env.example .env
 2) 启动（仅启动后端联调需要的最小组件）：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build postgres redis plugin backend
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build postgres redis backend
 ```
 
 说明：
-- `docker-compose.local.yml` 会把 `backend/plugin` 切换为本地构建。
+- `docker-compose.local.yml` 会把 `backend` 切换为本地构建。
 - `web` 不需要参与本次 OpenAI 兼容接口的 smoke（除非你要验证页面）。
 
 ## 5. Smoke（PowerShell，可复制粘贴）
@@ -115,7 +115,7 @@ $resp.Content.ReadAsStringAsync().Result
 
 期望：
 - status **不是** 403
-- 如果未配置 plug-in API key：返回 400，且 body 提示用户未配置
+- 如果未配置对应账号/凭证：返回 400，且 body 提示用户未配置/不可用
 - 如果已配置：返回 `candidates` 结构的 Gemini JSON
 
 ## 6. SSE / 反代缓冲注意事项
@@ -126,13 +126,15 @@ $resp.Content.ReadAsStringAsync().Result
 
 ## 7. 常见坑（部署/联调）
 
-1) plugin 数据库用户
-- `AntiHub-plugin/schema.sql` 内存在对角色 `antigravity` 的引用。
-- 因此 `.env` 里 `PLUGIN_DB_USER` 建议使用 `antigravity`（不要和 `POSTGRES_USER` 复用同一个用户）。
+1) 已初始化过的 postgres volume（账号/密码/库名不一致）
+- PostgreSQL 官方镜像的 init 流程只会在“首次初始化数据目录”时执行；复用旧数据卷但重写了 `.env` 时，可能出现无法连接或库不存在。
+- 推荐先运行一次 DB 同步任务（不会清空数据）：
 
-2) 已初始化过的 postgres volume
-- 如果你之前用错误的 `PLUGIN_DB_USER` 初始化过数据卷，plugin 可能会卡在 schema 初始化。
-- 最简单的清理方式是重置 volume（会清空本地数据，仅用于开发联调环境）：
+```bash
+docker compose -f docker-compose.yml -f docker/docker-compose.db-init.yml run --rm db-init
+```
+
+- 如果你是开发联调环境，也可以直接重置 volume（会清空本地数据）：
 
 ```bash
 docker compose down -v

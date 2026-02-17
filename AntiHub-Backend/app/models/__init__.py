@@ -5,6 +5,7 @@
 from app.models.user import User
 from app.models.oauth_token import OAuthToken
 from app.models.plugin_api_key import PluginAPIKey
+from app.models.plugin_user_mapping import PluginUserMapping
 from app.models.api_key import APIKey
 from app.models.usage_log import UsageLog
 from app.models.codex_account import CodexAccount
@@ -13,11 +14,19 @@ from app.models.gemini_cli_account import GeminiCLIAccount
 from app.models.user_setting import UserSetting
 from app.models.zai_tts_account import ZaiTTSAccount
 from app.models.zai_image_account import ZaiImageAccount
+from app.models.usage_counter import UsageCounter
+from app.models.antigravity_account import AntigravityAccount
+from app.models.antigravity_model_quota import AntigravityModelQuota
+from app.models.qwen_account import QwenAccount
+from app.models.kiro_account import KiroAccount
+from app.models.kiro_subscription_model import KiroSubscriptionModel
+from app.models.plugin_db_migration_state import PluginDbMigrationState
 
 __all__ = [
     "User",
     "OAuthToken",
     "PluginAPIKey",
+    "PluginUserMapping",
     "APIKey",
     "UsageLog",
     "CodexAccount",
@@ -26,4 +35,11 @@ __all__ = [
     "UserSetting",
     "ZaiTTSAccount",
     "ZaiImageAccount",
+    "UsageCounter",
+    "AntigravityAccount",
+    "AntigravityModelQuota",
+    "QwenAccount",
+    "KiroAccount",
+    "KiroSubscriptionModel",
+    "PluginDbMigrationState",
 ]

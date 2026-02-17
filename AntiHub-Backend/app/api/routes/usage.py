@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_plugin_api_service, get_db_session
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
+from app.repositories.usage_counter_repository import UsageCounterRepository
 from app.repositories.usage_log_repository import UsageLogRepository
 from app.models.usage_log import UsageLog
 
@@ -325,6 +326,7 @@ def _usage_log_to_dict(log: UsageLog) -> dict:
         "method": log.method,
         "model_name": log.model_name,
         "config_type": log.config_type,
+        "client_app": log.client_app,
         "stream": bool(log.stream),
         "success": bool(log.success),
         "status_code": log.status_code,
@@ -351,6 +353,7 @@ async def get_request_usage_logs(
     start_date: Optional[str] = Query(None, description="开始时间（ISO8601）"),
     end_date: Optional[str] = Query(None, description="结束时间（ISO8601）"),
     config_type: Optional[str] = Query(None, description="antigravity/kiro/qwen/codex/gemini-cli/zai-tts/zai-image"),
+    client_app: Optional[str] = Query(None, description="客户端标识（来自 X-App 请求头）"),
     success: Optional[bool] = Query(None, description="true=只看成功，false=只看失败，不传=全部"),
     model_name: Optional[str] = Query(None, description="模型名过滤"),
     current_user: User = Depends(get_current_user),
@@ -373,6 +376,7 @@ async def get_request_usage_logs(
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
             success=success,
             model_name=model_name,
         )
@@ -383,6 +387,7 @@ async def get_request_usage_logs(
             start_at=start_at,
             end_at=end_at,
             config_type=config_type,
+            client_app=client_app,
             success=success,
             model_name=model_name,
         )
@@ -412,6 +417,7 @@ async def get_request_usage_stats(
     start_date: Optional[str] = Query(None, description="开始时间（ISO8601）"),
     end_date: Optional[str] = Query(None, description="结束时间（ISO8601）"),
     config_type: Optional[str] = Query(None, description="antigravity/kiro/qwen/codex/gemini-cli/zai-tts/zai-image"),
+    client_app: Optional[str] = Query(None, description="客户端标识（来自 X-App 请求头）"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -422,13 +428,36 @@ async def get_request_usage_stats(
         start_at = _parse_iso_datetime(start_date)
         end_at = _parse_iso_datetime(end_date)
 
-        repo = UsageLogRepository(db)
-        stats_data = await repo.get_stats(
-            user_id=current_user.id,
-            start_at=start_at,
-            end_at=end_at,
-            config_type=config_type,
-        )
+        # usage_logs 仅保留最近 N 条（滑动窗口），不适合用来展示“累计消耗”。
+        # - 未指定时间范围：使用 usage_counters（累计统计，不裁剪）
+        # - 指定时间范围：仍使用 usage_logs（注意：仅代表日志表里现存数据）
+        if client_app:
+            repo = UsageLogRepository(db)
+            stats_data = await repo.get_stats(
+                user_id=current_user.id,
+                start_at=start_at,
+                end_at=end_at,
+                config_type=config_type,
+                client_app=client_app,
+            )
+            # usage_logs 表中暂不保存 cached_tokens（历史原因），这里保持字段存在但为 0
+            stats_data.setdefault("cached_tokens", 0)
+        elif start_at is None and end_at is None:
+            stats_data = await UsageCounterRepository(db).get_stats(
+                user_id=current_user.id,
+                config_type=config_type,
+            )
+        else:
+            repo = UsageLogRepository(db)
+            stats_data = await repo.get_stats(
+                user_id=current_user.id,
+                start_at=start_at,
+                end_at=end_at,
+                config_type=config_type,
+                client_app=client_app,
+            )
+            # usage_logs 表中暂不保存 cached_tokens（历史原因），这里保持字段存在但为 0
+            stats_data.setdefault("cached_tokens", 0)
 
         return {
             "success": True,
@@ -447,4 +476,45 @@ async def get_request_usage_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="获取请求用量统计失败",
+        )
+
+
+@router.get(
+    "/requests/logs/{log_id}/request-body",
+    summary="获取单条日志的请求体/请求头",
+    description="获取指定日志的原始请求体JSON与请求头（脱敏后），用于调试。需要验证日志归属当前用户。",
+)
+async def get_request_body(
+    log_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    获取单条日志的请求体/请求头
+    返回原始请求体JSON（如果有）与请求头（JSON字符串，脱敏后）
+    """
+    try:
+        repo = UsageLogRepository(db)
+        log = await repo.get_log_by_id(log_id=log_id, user_id=current_user.id)
+
+        if log is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="日志不存在或无权访问"
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "id": log.id,
+                "request_headers": log.request_headers,
+                "request_body": log.request_body,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="获取请求体失败",
         )

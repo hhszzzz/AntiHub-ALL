@@ -105,8 +105,23 @@ async function handleResponse<T>(response: Response): Promise<T> {
     } else {
       errorMessage = `HTTP ${response.status}: ${response.statusText}`;
     }
+
+    // 统一处理 410 Gone（已废弃的接口）
+    if (response.status === 410) {
+      const alternative =
+        (typeof errorBody?.alternative === 'string' && errorBody.alternative) ||
+        (typeof errorBody?.detail?.alternative === 'string' && errorBody.detail.alternative) ||
+        null;
+
+      if (alternative && !errorMessage.includes(alternative)) {
+        errorMessage = `${errorMessage}\n替代：${alternative}`;
+      }
+    }
     
-    throw new Error(errorMessage);
+    const err = new Error(errorMessage) as Error & { status?: number; alternative?: string };
+    err.status = response.status;
+    if (typeof errorBody?.alternative === 'string') err.alternative = errorBody.alternative;
+    throw err;
   }
   
   return response.json();
@@ -227,6 +242,7 @@ export async function fetchWithAuth<T>(
   
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
+    'X-App': 'AntiHub-Web',
     ...options.headers,
     ...(token && { 'Authorization': `Bearer ${token}` })
   };
@@ -1082,6 +1098,7 @@ export interface RequestUsageStats {
   success_requests: number;
   failed_requests: number;
   input_tokens: number;
+  cached_tokens?: number;
   output_tokens: number;
   total_tokens: number;
   total_quota_consumed: number;
@@ -1106,6 +1123,7 @@ export interface RequestUsageLogItem {
   method: string;
   model_name: string | null;
   config_type: string | null;
+  client_app?: string | null;
   stream: boolean;
   success: boolean;
   status_code: number | null;
@@ -1142,6 +1160,9 @@ export async function getUserQuotas(): Promise<UserQuotaItem[]> {
 
 /**
  * 获取配额消耗记录
+ *
+ * @deprecated plugin-era 接口已弃用（Backend 返回 410）。
+ *             请使用 `/api/usage/requests/*` 对应的 `getRequestUsageStats/getRequestUsageLogs`。
  */
 export async function getQuotaConsumption(params?: {
   limit?: number;
@@ -1166,11 +1187,13 @@ export async function getRequestUsageStats(params?: {
   start_date?: string;
   end_date?: string;
   config_type?: ApiType;
+  client_app?: string;
 }): Promise<RequestUsageStats> {
   const queryParams = new URLSearchParams();
   if (params?.start_date) queryParams.append('start_date', params.start_date);
   if (params?.end_date) queryParams.append('end_date', params.end_date);
   if (params?.config_type) queryParams.append('config_type', params.config_type);
+  if (params?.client_app) queryParams.append('client_app', params.client_app);
 
   const url = `${API_BASE_URL}/api/usage/requests/stats${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
   const result = await fetchWithAuth<{ success: boolean; data: RequestUsageStats }>(url, { method: 'GET' });
@@ -1186,6 +1209,7 @@ export async function getRequestUsageLogs(params?: {
   start_date?: string;
   end_date?: string;
   config_type?: ApiType;
+  client_app?: string;
   success?: boolean;
   model_name?: string;
 }): Promise<RequestUsageLogsResponse> {
@@ -1195,11 +1219,29 @@ export async function getRequestUsageLogs(params?: {
   if (params?.start_date) queryParams.append('start_date', params.start_date);
   if (params?.end_date) queryParams.append('end_date', params.end_date);
   if (params?.config_type) queryParams.append('config_type', params.config_type);
+  if (params?.client_app) queryParams.append('client_app', params.client_app);
   if (params?.success !== undefined) queryParams.append('success', params.success ? 'true' : 'false');
   if (params?.model_name) queryParams.append('model_name', params.model_name);
 
   const url = `${API_BASE_URL}/api/usage/requests/logs${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
   const result = await fetchWithAuth<{ success: boolean; data: RequestUsageLogsResponse }>(url, { method: 'GET' });
+  return result.data;
+}
+
+/**
+ * 获取单条日志的请求体
+ */
+export interface RequestBodyResponse {
+  id: number;
+  request_headers?: string | null;
+  request_body: string | null;
+}
+
+export async function getRequestLogBody(logId: number): Promise<RequestBodyResponse> {
+  const result = await fetchWithAuth<{ success: boolean; data: RequestBodyResponse }>(
+    `${API_BASE_URL}/api/usage/requests/logs/${logId}/request-body`,
+    { method: 'GET' }
+  );
   return result.data;
 }
 
@@ -1539,7 +1581,9 @@ export async function sendChatCompletionStream(
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${authToken}`,
     };
-    
+
+    headers['X-App'] = 'AntiHub-Web';
+     
     if (request.apiType) {
       headers['X-Api-Type'] = request.apiType;
     }

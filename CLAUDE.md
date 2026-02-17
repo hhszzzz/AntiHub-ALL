@@ -7,7 +7,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 AntiHub-ALL 是一个 Docker Compose 单体仓库，整合了 AntiHub 全栈服务：
 - **AntiHub/** — Next.js 16 前端 (TypeScript, React 19, Tailwind CSS 4)
 - **AntiHub-Backend/** — FastAPI 后端 (Python 3.10+, SQLAlchemy 2.0, Alembic)
-- **AntiHub-plugin/** — Node.js 插件/代理服务 (Express 5, ES Modules)
 - **AntiHook/** — Go 工具程序
 - **4-docs/** — This folder contains some project documents. Please check after each implementation to see if any documents need to be updated. 
 
@@ -49,13 +48,6 @@ uv run alembic revision --autogenerate -m "描述"
 uv run alembic downgrade -1
 ```
 
-**插件服务 (AntiHub-plugin/)**
-```bash
-cd AntiHub-plugin && npm ci
-npm run dev   # 开发模式（watch）
-npm start     # 生产模式
-```
-
 **Go 工具 (AntiHook/)**
 ```bash
 cd AntiHook
@@ -69,7 +61,7 @@ go build ./...
 | 层级 | 已对接服务 | 备注 |
 |------|-----------|------|
 | 后端 (AntiHub-Backend) | CodexCLI, Gemini | 新服务统一对接到这里 |
-| 插件 (AntiHub-plugin) | Antigravity, Kiro, Qwen | 不再新增对接 |
+| 备注 | AntiHub-plugin | 旧 Node plugin 运行时能力已合并进 Backend；`AntiHub-plugin/` 仅作为迁移助手（Env Exporter），默认不部署 |
 
 ### 后端架构 (FastAPI)
 ```
@@ -93,28 +85,31 @@ app/
 └── dashboard/      # 仪表盘页面
 ```
 
-### 插件服务架构 (Node.js)
-```
-src/
-├── server/         # Express 服务入口
-├── api/            # API 路由
-├── services/       # 业务逻辑（Antigravity, Kiro, Qwen）
-├── db/             # PostgreSQL 连接
-└── config/         # 配置管理
-```
+### 说明：AntiHub-plugin
+
+历史上仓库包含 `AntiHub-plugin/`（Node 代理/插件服务），用于承载部分上游对接逻辑；其**运行时能力**已迁移并合并至 `AntiHub-Backend/`。当前仓库保留一个最小化的 `AntiHub-plugin/`（Env Exporter）用于升级/迁移期向 Backend 提供旧 DB 连接信息，默认不部署。
 
 ## 代码规范
 
-- **TypeScript**: 组件用 PascalCase，变量/函数用 camelCase
+- **TypeScript**: 组件用 PascalCase，变量/函数用 camelCase；运行 `pnpm lint` 检查
 - **Python**: 4 空格缩进，异步路由保持非阻塞，类型注解
 - **Go**: 运行 `gofmt` 格式化
 - **提交信息**: `<type>: <summary>`（feat:, fix:, !表示破坏性变更）
+- **模块独立性**: 保持改动范围在所修改的模块内，遵循该文件夹的现有模式
+
+## 生成的工件
+
+以下文件不应该被提交（各模块的 `.gitignore` 已配置）：
+- `.next/` — Next.js 构建输出
+- `node_modules/` — npm 依赖
+- `.venv/` — Python 虚拟环境
+- `__pycache__/` — Python 缓存
+- `AntiHook/` 中的二进制文件
 
 ## 环境变量
 
 必须配置的密钥（在 `.env` 中）：
 - `JWT_SECRET_KEY` — JWT 签名密钥
-- `PLUGIN_ADMIN_API_KEY` — 插件管理 API 密钥
 - `PLUGIN_API_ENCRYPTION_KEY` — Fernet 加密密钥（32字节 base64）
 
 可选配置：
@@ -122,12 +117,23 @@ src/
 - `CODEX_SUPPORTED_MODELS` — 覆盖 Codex 模型列表
 - `CODEX_PROXY_URL` — Codex 出站代理
 
+**添加新环境变量时**，需要同时更新对应的 `*.example` 文件并文档化默认值。
+
 ## 测试
 
 目前没有统一的测试运行器。验证方式：
 1. Docker 冒烟测试：`docker compose up`
 2. 手动验证受影响的 UI 路由 / API 端点
-3. 模块特定测试（如 `AntiHub-plugin/test/`）
+
+## 提交和 PR 指南
+
+提交信息遵循 `<type>: <summary>` 格式（常见类型：`feat:`、`fix:`；`!` 表示破坏性变更）。
+
+PR 应包含：
+- **改动说明** — 做了什么、为什么做
+- **验证方式** — 具体的验证命令和步骤
+- **UI 变更截图** — 如有前端改动，需提供截图
+- **环境变量更新** — 如添加新的环境变量，需更新 `*.example` 文件并文档化默认值
 
 ## API 文档
 
@@ -138,5 +144,4 @@ src/
 ## 注意事项
 
 - 前端已内置 `/backend/* -> http://backend:8000/*` 转发
-- 插件服务首次启动会自动初始化数据库
 - 生产环境 API 文档会被禁用

@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
 from app.core.exceptions import BaseAPIException
+from app.core.request_context import RequestContextMiddleware
 from app.db.session import init_db, close_db
 from app.cache import init_redis, close_redis
 from app.api.routes import (
@@ -183,6 +184,19 @@ async def lifespan(app: FastAPI):
         )
         raise
 
+    # 启动时执行 plugin DB → Backend DB 迁移（可选）
+    try:
+        from app.services.plugin_db_migration_service import ensure_plugin_db_migrated
+
+        async with session_maker() as session:
+            await ensure_plugin_db_migrated(session)
+    except Exception as e:
+        logger.error(
+            f"执行 plugin DB 迁移失败: {type(e).__name__}: {str(e)}",
+            exc_info=True,
+        )
+        raise
+
     # 启动时清理 TTS 临时文件
     try:
         from app.services.zai_tts_service import ZaiTTSService
@@ -253,6 +267,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ==================== Request Context（请求头等） ====================
+    # 使用 ASGI middleware（非 BaseHTTPMiddleware），避免影响 StreamingResponse（SSE）
+    app.add_middleware(RequestContextMiddleware)
 
     # ==================== Debug 日志（请求体） ====================
     # 注意：开启后会打印所有请求的原始请求体，可能包含敏感信息（密码/Token等）

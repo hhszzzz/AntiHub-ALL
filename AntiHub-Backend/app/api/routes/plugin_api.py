@@ -5,14 +5,28 @@ Plug-in API相关的路由
 from typing import Optional
 import time
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_user_from_api_key, get_plugin_api_service
+from app.api.deps import (
+    get_current_user,
+    get_user_from_api_key,
+    get_plugin_api_service,
+    get_qwen_api_service,
+    get_db_session,
+    get_redis,
+)
 from app.api.deps_flexible import get_user_flexible
+from app.cache import RedisClient
 from app.models.user import User
+from app.services.codex_service import CodexService
+from app.services.gemini_cli_api_service import GeminiCLIAPIService
+from app.services.kiro_service import KiroService
 from app.services.plugin_api_service import PluginAPIService
+from app.services.qwen_api_service import QwenAPIService
 from app.services.usage_log_service import UsageLogService, SSEUsageTracker, extract_openai_usage
+from app.services.zai_image_service import ZaiImageService
 from app.schemas.plugin_api import (
     PluginAPIKeyCreate,
     PluginAPIKeyResponse,
@@ -31,8 +45,24 @@ from app.schemas.plugin_api import (
     GenerateContentRequest,
 )
 
+from app.api.routes.v1 import chat_completions as v1_chat_completions
+
 
 router = APIRouter(prefix="/plugin-api", tags=["Plug-in API"])
+
+
+def _raise_value_error(e: ValueError) -> None:
+    """
+    将 service 层的 ValueError 映射为对前端更友好的 HTTP 错误码。
+
+    约定：
+    - “账号不存在/配额记录不存在” => 404
+    - 其它参数/业务校验 => 400
+    """
+    message = str(e)
+    if message in ("账号不存在", "配额记录不存在"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
 
 
 # ==================== 密钥管理 ====================
@@ -225,10 +255,7 @@ async def get_account(
         result = await service.get_account(current_user.id, cookie_id)
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -257,7 +284,7 @@ async def get_account_credentials(
             detail = error_data
         raise HTTPException(status_code=e.response.status_code, detail=detail)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        _raise_value_error(e)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -280,10 +307,7 @@ async def get_account_detail(
         result = await service.get_account_detail(current_user.id, cookie_id)
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -318,10 +342,7 @@ async def refresh_account(
             detail=detail
         )
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -352,7 +373,7 @@ async def get_account_projects(
             detail = error_data
         raise HTTPException(status_code=e.response.status_code, detail=detail)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        _raise_value_error(e)
     except Exception:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取项目列表失败")
 
@@ -381,7 +402,7 @@ async def update_account_project_id(
             detail = error_data
         raise HTTPException(status_code=e.response.status_code, detail=detail)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        _raise_value_error(e)
     except Exception:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="更新Project ID失败")
 
@@ -406,10 +427,7 @@ async def update_account_status(
         )
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -435,10 +453,7 @@ async def delete_account(
         )
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -466,10 +481,7 @@ async def update_account_name(
         )
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -506,22 +518,8 @@ async def update_account_type(
             is_shared=request.is_shared
         )
         return result
-    except httpx.HTTPStatusError as e:
-        # 透传上游API的错误响应
-        error_data = getattr(e, 'response_data', {"detail": str(e)})
-        if isinstance(error_data, dict) and 'detail' in error_data:
-            detail = error_data['detail']
-        else:
-            detail = error_data
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=detail
-        )
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -547,10 +545,7 @@ async def get_account_quotas(
         )
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -580,10 +575,7 @@ async def update_model_quota_status(
         )
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -607,10 +599,7 @@ async def get_user_quotas(
         result = await service.get_user_quotas(current_user.id)
         return result
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        _raise_value_error(e)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -625,22 +614,15 @@ async def get_user_quotas(
 )
 async def get_shared_pool_quotas(
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """获取共享池配额"""
-    try:
-        result = await service.get_shared_pool_quotas(current_user.id)
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取共享池配额失败"
-        )
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "共享池配额已弃用",
+            "alternative": "/api/plugin-api/quotas/user",
+        },
+    )
 
 
 @router.get(
@@ -653,27 +635,15 @@ async def get_quota_consumption(
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """获取配额消耗记录"""
-    try:
-        result = await service.get_quota_consumption(
-            user_id=current_user.id,
-            limit=limit,
-            start_date=start_date,
-            end_date=end_date
-        )
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取配额消耗记录失败"
-        )
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "配额消耗记录接口已弃用",
+            "alternative": "/api/usage/requests/*",
+        },
+    )
 
 
 # ==================== OpenAI兼容接口 ====================
@@ -684,15 +654,47 @@ async def get_quota_consumption(
     description="获取可用的AI模型列表"
 )
 async def get_models(
+    raw_request: Request,
     current_user: User = Depends(get_user_from_api_key),
-    service: PluginAPIService = Depends(get_plugin_api_service)
+    service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
 ):
     """获取模型列表"""
     try:
-        # 获取 config_type（通过 API key 认证时会设置）
-        config_type = getattr(current_user, '_config_type', None)
-        result = await service.get_models(current_user.id, config_type=config_type)
-        return result
+        config_type = getattr(current_user, "_config_type", None)
+        if config_type is None:
+            api_type = raw_request.headers.get("X-Api-Type")
+            if api_type in ["kiro", "antigravity", "qwen", "codex", "gemini-cli", "zai-image", "zai-tts"]:
+                config_type = api_type
+
+        effective_config_type = (config_type or "antigravity").strip().lower()
+
+        if effective_config_type in ("zai-image", "zai-tts"):
+            return {"object": "list", "data": []}
+
+        if effective_config_type == "codex":
+            codex_service = CodexService(db, redis)
+            return await codex_service.openai_list_models()
+
+        if effective_config_type == "gemini-cli":
+            gemini_cli_service = GeminiCLIAPIService(db, redis)
+            return await gemini_cli_service.openai_list_models(user_id=current_user.id)
+
+        if effective_config_type == "qwen":
+            return qwen_service.openai_list_models()
+
+        if effective_config_type == "kiro":
+            if current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Kiro配置仅对beta计划用户开放",
+                )
+            kiro_service = KiroService(db, redis)
+            return await kiro_service.get_models(current_user.id)
+
+        return await service.get_models(current_user.id, config_type=effective_config_type)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -714,165 +716,27 @@ async def chat_completions(
     request: ChatCompletionRequest,
     raw_request: Request,
     current_user: User = Depends(get_user_from_api_key),
-    service: PluginAPIService = Depends(get_plugin_api_service)
+    antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
 ):
-    """聊天补全"""
-    start_time = time.monotonic()
-    endpoint = raw_request.url.path
-    method = raw_request.method
-    api_key_id = getattr(current_user, "_api_key_id", None)
-    model_name = getattr(request, "model", None)
+    kiro_service = KiroService(db, redis)
+    codex_service = CodexService(db, redis)
+    gemini_cli_service = GeminiCLIAPIService(db, redis)
+    zai_image_service = ZaiImageService(db)
 
-    config_type = getattr(current_user, "_config_type", None)
-    effective_config_type = config_type or "antigravity"
-
-    try:
-        extra_headers: dict[str, str] = {}
-        if config_type:
-            extra_headers["X-Account-Type"] = config_type
-
-        if request.stream:
-            tracker = SSEUsageTracker()
-
-            async def generate():
-                try:
-                    async for chunk in service.proxy_stream_request(
-                        user_id=current_user.id,
-                        method="POST",
-                        path="/v1/chat/completions",
-                        json_data=request.model_dump(),
-                        extra_headers=extra_headers if extra_headers else None,
-                    ):
-                        tracker.feed(chunk)
-                        yield chunk
-                except Exception as e:
-                    tracker.success = False
-                    tracker.status_code = tracker.status_code or 500
-                    tracker.error_message = str(e)
-                    raise
-                finally:
-                    tracker.finalize()
-                    duration_ms = int((time.monotonic() - start_time) * 1000)
-                    await UsageLogService.record(
-                        user_id=current_user.id,
-                        api_key_id=api_key_id,
-                        endpoint=endpoint,
-                        method=method,
-                        model_name=model_name,
-                        config_type=effective_config_type,
-                        stream=True,
-                        input_tokens=tracker.input_tokens,
-                        output_tokens=tracker.output_tokens,
-                        total_tokens=tracker.total_tokens,
-                        success=tracker.success,
-                        status_code=tracker.status_code,
-                        error_message=tracker.error_message,
-                        duration_ms=duration_ms,
-                    )
-
-            return StreamingResponse(generate(), media_type="text/event-stream")
-
-        result = await service.proxy_request(
-            user_id=current_user.id,
-            method="POST",
-            path="/v1/chat/completions",
-            json_data=request.model_dump(),
-            extra_headers=extra_headers if extra_headers else None,
-        )
-
-        in_tok, out_tok, total_tok = extract_openai_usage(result)
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=False,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            total_tokens=total_tok,
-            success=True,
-            status_code=200,
-            duration_ms=duration_ms,
-        )
-        return result
-    except ValueError as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=bool(request.stream),
-            success=False,
-            status_code=status.HTTP_400_BAD_REQUEST,
-            error_message=str(e),
-            duration_ms=duration_ms,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except httpx.HTTPStatusError as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        upstream_response = getattr(e, "response_data", None)
-        if upstream_response is None:
-            try:
-                upstream_response = e.response.json()
-            except Exception:
-                upstream_response = {"error": e.response.text}
-
-        error_message = None
-        if isinstance(upstream_response, dict):
-            error_message = (
-                upstream_response.get("detail")
-                or upstream_response.get("error")
-                or upstream_response.get("message")
-                or str(upstream_response)
-            )
-        else:
-            error_message = str(upstream_response)
-
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=bool(request.stream),
-            success=False,
-            status_code=e.response.status_code,
-            error_message=error_message,
-            duration_ms=duration_ms,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="聊天补全失败",
-        )
-    except Exception as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=bool(request.stream),
-            success=False,
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            error_message=str(e),
-            duration_ms=duration_ms,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"聊天补全失败"
-        )
+    return await v1_chat_completions(
+        request=request,
+        raw_request=raw_request,
+        current_user=current_user,
+        antigravity_service=antigravity_service,
+        qwen_service=qwen_service,
+        kiro_service=kiro_service,
+        codex_service=codex_service,
+        gemini_cli_service=gemini_cli_service,
+        zai_image_service=zai_image_service,
+    )
 
 
 # ==================== 用户设置 ====================
@@ -884,23 +748,19 @@ async def chat_completions(
 )
 async def get_cookie_preference(
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """获取用户信息和Cookie优先级设置"""
-    try:
-        # 从plug-in-api获取用户信息
-        result = await service.get_user_info(current_user.id)
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取用户信息失败"
-        )
+    return {
+        "success": True,
+        "data": {
+            "user_id": str(current_user.id),
+            "name": current_user.username,
+            "prefer_shared": 0,
+            "status": 1 if current_user.is_active else 0,
+            "created_at": current_user.created_at,
+            "updated_at": current_user.updated_at,
+        },
+    }
 
 
 @router.put(
@@ -909,38 +769,15 @@ async def get_cookie_preference(
     description="更新用户的Cookie使用优先级设置"
 )
 async def update_cookie_preference(
-    request: UpdateCookiePreferenceRequest,
     current_user: User = Depends(get_current_user),
-    service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """更新Cookie优先级"""
-    try:
-        # 获取plugin_user_id
-        key_record = await service.repo.get_by_user_id(current_user.id)
-        if not key_record or not key_record.plugin_user_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="未找到plug-in用户ID"
-            )
-        
-        result = await service.update_cookie_preference(
-            user_id=current_user.id,
-            plugin_user_id=key_record.plugin_user_id,
-            prefer_shared=request.prefer_shared
-        )
-        return result
-    except HTTPException:
-        raise
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"更新Cookie优先级失败"
-        )
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "Cookie 优先级（prefer_shared）机制已弃用",
+        },
+    )
 
 
 # ==================== Gemini图片生成API ====================
@@ -953,6 +790,7 @@ async def update_cookie_preference(
 async def generate_content(
     model: str,
     request: GenerateContentRequest,
+    raw_request: Request,
     current_user: User = Depends(get_user_flexible),
     service: PluginAPIService = Depends(get_plugin_api_service)
 ):
@@ -1017,7 +855,11 @@ async def generate_content(
     """
     try:
         # 获取 config_type（通过 API key 认证时会设置）
-        config_type = getattr(current_user, '_config_type', None)
+        config_type = getattr(current_user, "_config_type", None)
+        if config_type is None:
+            api_type = raw_request.headers.get("X-Api-Type") or raw_request.headers.get("X-Account-Type")
+            if isinstance(api_type, str) and api_type.strip():
+                config_type = api_type.strip()
         
         result = await service.generate_content(
             user_id=current_user.id,

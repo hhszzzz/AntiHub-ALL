@@ -3,6 +3,7 @@
 使用 pydantic-settings 从环境变量加载配置
 """
 from typing import Optional
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -40,18 +41,41 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = Field(default=7, description="Refresh Token 过期时间（天）")
     refresh_token_secret_key: Optional[str] = Field(default=None, description="Refresh Token 密钥（默认使用 JWT 密钥）")
     
-    # Plug-in API 配置
-    plugin_api_base_url: str = Field(
-        default="http://localhost:8045",
-        description="Plug-in API服务的基础URL"
-    )
-    plugin_api_admin_key: Optional[str] = Field(
-        None,
-        description="Plug-in API管理员密钥（用于创建用户等管理操作）"
-    )
+    # 凭证/密钥加密（Fernet key）
     plugin_api_encryption_key: str = Field(
         ...,
-        description="用于加密存储用户API密钥的密钥"
+        description="Fernet 加密密钥：用于加密存储各类上游凭证/API Key（不要随意更换，否则历史密文无法解密）"
+    )
+
+    # Kiro 配置（可选）
+    kiro_ide_version: str = Field(
+        default="0.9.2",
+        description="Kiro 请求 User-Agent 使用的 IDE 版本（默认 0.9.2）",
+    )
+    kiro_proxy_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Kiro 上游请求代理（HTTP/SOCKS）。示例：http://127.0.0.1:7890；"
+            "如果后端运行在 Docker 内且代理在宿主机，请使用 http://host.docker.internal:7890"
+        ),
+    )
+
+    # 旧 plugin DB → Backend DB 自动迁移（可选）
+    #
+    # 新部署：不要配置 PLUGIN_API_BASE_URL（留空），后端会直接启动，不会触发迁移逻辑。
+    # 升级/迁移：配置 PLUGIN_API_BASE_URL 指向 “迁移助手(Plugin env exporter)” 服务，
+    #          后端启动时会自动拉取 DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD 并迁移。
+    plugin_api_base_url: Optional[str] = Field(
+        default=None,
+        description="Plugin env exporter API Base URL（配置后启用启动期迁移）",
+    )
+    plugin_env_export_token: Optional[str] = Field(
+        default=None,
+        description="Plugin env exporter 鉴权 Token（可选，对应请求头 X-Migration-Token）",
+    )
+    plugin_db_migration_wait_timeout_seconds: int = Field(
+        default=600,
+        description="检测到迁移进行中时等待迁移完成的超时时间（秒）",
     )
 
     # ZAI TTS 配置

@@ -18,12 +18,13 @@ from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_flexible import get_user_flexible
-from app.api.deps import get_plugin_api_service, get_db_session, get_redis
+from app.api.deps import get_plugin_api_service, get_qwen_api_service, get_db_session, get_redis
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService, UpstreamAPIError
 from app.services.codex_service import CodexService
 from app.services.gemini_cli_api_service import GeminiCLIAPIService, GeminiCLIModelCooldownError
+from app.services.qwen_api_service import QwenAPIService
 from app.services.zai_tts_service import ZaiTTSService
 from app.services.zai_image_service import ZaiImageService
 from app.services.anthropic_adapter import AnthropicAdapter
@@ -291,6 +292,7 @@ async def list_models(
     request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
     codex_service: CodexService = Depends(get_codex_service),
     gemini_cli_service: GeminiCLIAPIService = Depends(get_gemini_cli_api_service),
@@ -318,6 +320,7 @@ async def list_models(
         use_kiro = config_type == "kiro"
         use_codex = config_type == "codex"
         use_gemini_cli = config_type == "gemini-cli"
+        use_qwen = config_type == "qwen"
         
         if config_type in ("zai-image", "zai-tts"):
             result = {"object": "list", "data": []}
@@ -325,6 +328,8 @@ async def list_models(
             result = await codex_service.openai_list_models()
         elif use_gemini_cli:
             result = await gemini_cli_service.openai_list_models(user_id=current_user.id)
+        elif use_qwen:
+            result = qwen_service.openai_list_models()
         elif use_kiro:
             # 检查 beta 权限（管理员放行）
             if current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:
@@ -437,6 +442,8 @@ async def audio_speech(
             duration_ms=duration_ms,
             tts_voice_id=tts_voice_id,
             tts_account_id=tts_account_id,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
 
     # 选择账号：voice 必须匹配已保存的音色ID，否则拒绝（403）
@@ -522,6 +529,12 @@ async def image_generations(
     method = raw_request.method
     api_key_id = getattr(current_user, "_api_key_id", None)
 
+    # 先获取 request_json，用于记录请求体
+    try:
+        request_json = await raw_request.json()
+    except Exception:
+        request_json = None
+
     async def _record_usage(
         success: bool,
         status_code: Optional[int],
@@ -546,6 +559,8 @@ async def image_generations(
             status_code=status_code,
             error_message=error_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
 
     config_type = getattr(current_user, "_config_type", None)
@@ -559,9 +574,7 @@ async def image_generations(
         await _record_usage(False, status.HTTP_403_FORBIDDEN, "config_type must be zai-image")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="config_type must be zai-image")
 
-    try:
-        request_json = await raw_request.json()
-    except Exception:
+    if request_json is None:
         await _record_usage(False, status.HTTP_400_BAD_REQUEST, "Invalid JSON request body")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON request body")
 
@@ -741,11 +754,14 @@ async def responses(
                             stream=True,
                             input_tokens=tracker.input_tokens,
                             output_tokens=tracker.output_tokens,
+                            cached_tokens=tracker.cached_tokens,
                             total_tokens=tracker.total_tokens,
                             success=(False if had_exception else tracker.success),
                             status_code=tracker.status_code or (500 if had_exception else 200),
                             error_message=tracker.error_message,
                             duration_ms=duration_ms,
+                            client_app=raw_request.headers.get("X-App"),
+                            request_body=request_json,
                         )
                         if _account is not None and (
                             tracker.input_tokens
@@ -799,10 +815,13 @@ async def responses(
                 stream=False,
                 input_tokens=in_tok,
                 output_tokens=out_tok,
+                cached_tokens=cached_tok,
                 total_tokens=total_tok,
                 success=True,
                 status_code=200,
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
             if any([in_tok, out_tok, total_tok, cached_tok]):
                 account_id = int(getattr(account, "id", 0) or 0)
@@ -832,6 +851,8 @@ async def responses(
             status_code=e.status_code,
             error_message=str(e.detail) if hasattr(e, "detail") else str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         raise
     except UpstreamAPIError as e:
@@ -848,6 +869,8 @@ async def responses(
             status_code=e.status_code,
             error_message=e.extracted_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         return JSONResponse(
             status_code=e.status_code,
@@ -885,6 +908,7 @@ async def responses(
             status_code=e.response.status_code,
             error_message=error_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         return JSONResponse(status_code=e.response.status_code, content=upstream_response)
     except ValueError as e:
@@ -901,6 +925,7 @@ async def responses(
             status_code=status.HTTP_400_BAD_REQUEST,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -917,6 +942,7 @@ async def responses(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -988,10 +1014,12 @@ async def responses_compact(
             stream=False,
             input_tokens=in_tok,
             output_tokens=out_tok,
+            cached_tokens=cached_tok,
             total_tokens=total_tok,
             success=True,
             status_code=200,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
 
         if any([in_tok, out_tok, total_tok, cached_tok]):
@@ -1023,6 +1051,7 @@ async def responses_compact(
             status_code=e.status_code,
             error_message=str(e.detail) if hasattr(e, "detail") else str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         raise
     except UpstreamAPIError as e:
@@ -1039,6 +1068,7 @@ async def responses_compact(
             status_code=e.status_code,
             error_message=e.extracted_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         return JSONResponse(
             status_code=e.status_code,
@@ -1076,6 +1106,7 @@ async def responses_compact(
             status_code=e.response.status_code,
             error_message=error_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         return JSONResponse(status_code=e.response.status_code, content=upstream_response)
     except ValueError as e:
@@ -1092,6 +1123,7 @@ async def responses_compact(
             status_code=status.HTTP_400_BAD_REQUEST,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -1108,6 +1140,7 @@ async def responses_compact(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1118,13 +1151,14 @@ async def responses_compact(
 @router.post(
     "/chat/completions",
     summary="聊天补全",
-    description="使用plug-in-api进行聊天补全（OpenAI兼容）。根据API key的config_type自动选择Antigravity / Kiro / Qwen配置"
+    description="在 Backend 内选择上游并进行聊天补全（OpenAI兼容）。根据 API key 的 config_type 或 X-Api-Type 自动选择 Antigravity / Kiro / Qwen / Codex 等配置。"
 )
 async def chat_completions(
     request: ChatCompletionRequest,
     raw_request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
     codex_service: CodexService = Depends(get_codex_service),
     gemini_cli_service: GeminiCLIAPIService = Depends(get_gemini_cli_api_service),
@@ -1141,13 +1175,14 @@ async def chat_completions(
     - 使用JWT token时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置（antigravity/kiro/qwen）
     - Kiro配置需要beta权限（qwen不需要）
     
-    我们使用用户对应的plug-in key调用plug-in-api
+    我们在 Backend 内部按渠道选择上游并转发（逐步移除对 AntiHub-plugin 运行时的依赖）
     """
     start_time = time.monotonic()
     endpoint = raw_request.url.path
     method = raw_request.method
     api_key_id = getattr(current_user, "_api_key_id", None)
     model_name = getattr(request, "model", None)
+    request_json = request.model_dump()
 
     config_type = getattr(current_user, "_config_type", None)
     if config_type is None:
@@ -1159,12 +1194,13 @@ async def chat_completions(
     use_kiro = effective_config_type == "kiro"
     use_codex = effective_config_type == "codex"
     use_gemini_cli = effective_config_type == "gemini-cli"
+    use_qwen = effective_config_type == "qwen"
 
     if _is_local_image_model(model_name):
         if effective_config_type != "zai-image":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="config_type must be zai-image")
 
-        request_data = request.model_dump()
+        request_data = request_json
 
         try:
             prompt = _extract_openai_chat_text_prompt(request_data.get("messages"))
@@ -1233,6 +1269,8 @@ async def chat_completions(
                 success=True,
                 status_code=200,
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
 
             created_ts = int(time.time())
@@ -1316,6 +1354,8 @@ async def chat_completions(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 error_message=str(e),
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except Exception as e:
@@ -1336,6 +1376,8 @@ async def chat_completions(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 error_message=str(e),
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
@@ -1345,7 +1387,7 @@ async def chat_completions(
 
     try:
         if use_codex:
-            request_data = request.model_dump()
+            request_data = request_json
             responses_request = chat_completions_request_to_responses_request(request_data)
 
             if request.stream:
@@ -1416,11 +1458,14 @@ async def chat_completions(
                             stream=True,
                             input_tokens=tracker.input_tokens,
                             output_tokens=tracker.output_tokens,
+                            cached_tokens=tracker.cached_tokens,
                             total_tokens=tracker.total_tokens,
                             success=(False if had_exception else tracker.success),
                             status_code=tracker.status_code or (500 if had_exception else 200),
                             error_message=tracker.error_message,
                             duration_ms=duration_ms,
+                            client_app=raw_request.headers.get("X-App"),
+                            request_body=request_json,
                         )
                         if _account is not None and (
                             tracker.input_tokens
@@ -1478,10 +1523,13 @@ async def chat_completions(
                 stream=False,
                 input_tokens=in_tok,
                 output_tokens=out_tok,
+                cached_tokens=cached_tok,
                 total_tokens=total_tok,
                 success=True,
                 status_code=200,
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
             if any([in_tok, out_tok, total_tok, cached_tok]):
                 account_id = int(getattr(account, "id", 0) or 0)
@@ -1515,7 +1563,7 @@ async def chat_completions(
             if use_gemini_cli:
                 gemini_cli_stream = gemini_cli_service.openai_chat_completions_stream(
                     user_id=current_user.id,
-                    request_data=request.model_dump(),
+                    request_data=request_json,
                 )
                 try:
                     gemini_cli_first_chunk = await gemini_cli_stream.__anext__()
@@ -1539,20 +1587,24 @@ async def chat_completions(
                     elif use_kiro:
                         async for chunk in kiro_service.chat_completions_stream(
                             user_id=current_user.id,
-                            request_data=request.model_dump(),
+                            request_data=request_json,
                         ):
                             if isinstance(chunk, (bytes, bytearray)):
                                 tracker.feed(bytes(chunk))
                             else:
                                 tracker.feed(str(chunk).encode("utf-8", errors="replace"))
                             yield chunk
-                    else:
-                        async for chunk in antigravity_service.proxy_stream_request(
+                    elif use_qwen:
+                        async for chunk in qwen_service.openai_chat_completions_stream(
                             user_id=current_user.id,
-                            method="POST",
-                            path="/v1/chat/completions",
-                            json_data=request.model_dump(),
-                            extra_headers=extra_headers if extra_headers else None,
+                            request_data=request_json,
+                        ):
+                            tracker.feed(chunk)
+                            yield chunk
+                    else:
+                        async for chunk in antigravity_service.openai_chat_completions_stream(
+                            user_id=current_user.id,
+                            request_data=request_json,
                         ):
                             tracker.feed(chunk)
                             yield chunk
@@ -1574,11 +1626,14 @@ async def chat_completions(
                         stream=True,
                         input_tokens=tracker.input_tokens,
                         output_tokens=tracker.output_tokens,
+                        cached_tokens=tracker.cached_tokens,
                         total_tokens=tracker.total_tokens,
                         success=tracker.success,
                         status_code=tracker.status_code,
                         error_message=tracker.error_message,
                         duration_ms=duration_ms,
+                        client_app=raw_request.headers.get("X-App"),
+                        request_body=request_json,
                     )
 
             return StreamingResponse(
@@ -1591,7 +1646,7 @@ async def chat_completions(
         if use_gemini_cli:
             result = await gemini_cli_service.openai_chat_completions(
                 user_id=current_user.id,
-                request_data=request.model_dump(),
+                request_data=request_json,
             )
             duration_ms = int((time.monotonic() - start_time) * 1000)
             in_tok, out_tok, total_tok = extract_openai_usage(result)
@@ -1609,21 +1664,25 @@ async def chat_completions(
                 success=True,
                 status_code=200,
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
             return result
 
         if use_kiro:
             openai_stream = kiro_service.chat_completions_stream(
                 user_id=current_user.id,
-                request_data=request.model_dump(),
+                request_data=request_json,
+            )
+        elif use_qwen:
+            openai_stream = qwen_service.openai_chat_completions_stream(
+                user_id=current_user.id,
+                request_data=request_json,
             )
         else:
-            openai_stream = antigravity_service.proxy_stream_request(
+            openai_stream = antigravity_service.openai_chat_completions_stream(
                 user_id=current_user.id,
-                method="POST",
-                path="/v1/chat/completions",
-                json_data=request.model_dump(),
-                extra_headers=extra_headers if extra_headers else None,
+                request_data=request_json,
             )
 
         tracker = SSEUsageTracker()
@@ -1661,11 +1720,14 @@ async def chat_completions(
                 stream=False,
                 input_tokens=tracker.input_tokens,
                 output_tokens=tracker.output_tokens,
+                cached_tokens=tracker.cached_tokens,
                 total_tokens=tracker.total_tokens,
                 success=False,
                 status_code=code,
                 error_message=tracker.error_message,
                 duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_body=request_json,
             )
             return JSONResponse(status_code=code, content=error_payload)
 
@@ -1683,10 +1745,13 @@ async def chat_completions(
             stream=False,
             input_tokens=in_tok,
             output_tokens=out_tok,
+            cached_tokens=tracker.cached_tokens,
             total_tokens=total_tok,
             success=True,
             status_code=200,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         return result
 
@@ -1704,6 +1769,8 @@ async def chat_completions(
             status_code=e.status_code,
             error_message=str(e.detail) if hasattr(e, "detail") else str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         raise
     except UpstreamAPIError as e:
@@ -1720,6 +1787,8 @@ async def chat_completions(
             status_code=e.status_code,
             error_message=e.extracted_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         return JSONResponse(
             status_code=e.status_code,
@@ -1760,6 +1829,8 @@ async def chat_completions(
             status_code=e.response.status_code,
             error_message=error_message,
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
 
         return JSONResponse(
@@ -1781,6 +1852,8 @@ async def chat_completions(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -1807,6 +1880,8 @@ async def chat_completions(
             status_code=status.HTTP_400_BAD_REQUEST,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -1823,6 +1898,8 @@ async def chat_completions(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             error_message=str(e),
             duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_body=request_json,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
