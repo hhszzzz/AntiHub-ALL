@@ -84,6 +84,7 @@ export default function AnalyticsPage() {
   const [isLoadingBody, setIsLoadingBody] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image'>('antigravity');
+  const [viewMode, setViewMode] = useState<'channel' | 'requests'>('requests');
   const [isTabInitialized, setIsTabInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingRequests, setIsLoadingRequests] = useState(false);
@@ -94,7 +95,10 @@ export default function AnalyticsPage() {
       try {
         const settings = await getUiDefaultChannels();
         if (settings.usage_default_channel) {
-          setActiveTab(settings.usage_default_channel);
+          const nextTab = settings.usage_default_channel;
+          setActiveTab(nextTab);
+          // Antigravity/Kiro 同时有「渠道侧数据」和「本系统 usage_logs」两份视图，默认展示本系统日志（避免页面看起来重复）
+          setViewMode('requests');
         }
       } catch {
         // 不阻塞消耗日志页面：设置读取失败时保持默认渠道
@@ -108,13 +112,20 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     if (!isTabInitialized) return;
+    if ((activeTab === 'antigravity' || activeTab === 'kiro') && viewMode !== 'channel') {
+      setIsLoading(false);
+      return;
+    }
     loadTabData();
-  }, [isTabInitialized, activeTab, currentPage, antigravityCurrentPage]);
+  }, [isTabInitialized, activeTab, viewMode, currentPage, antigravityCurrentPage]);
 
   useEffect(() => {
     if (!isTabInitialized) return;
+    if ((activeTab === 'antigravity' || activeTab === 'kiro') && viewMode !== 'requests') {
+      return;
+    }
     loadRequestData();
-  }, [isTabInitialized, activeTab, requestCurrentPage]);
+  }, [isTabInitialized, activeTab, viewMode, requestCurrentPage]);
 
   const loadTabData = async () => {
     if (activeTab !== 'antigravity' && activeTab !== 'kiro') {
@@ -403,6 +414,8 @@ export default function AnalyticsPage() {
             onValueChange={(value: 'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image') => {
               setActiveTab(value);
               setRequestCurrentPage(1);
+              // 切换渠道时默认展示「本系统日志」（与其他渠道保持一致），渠道侧用量可在下方切换
+              setViewMode('requests');
             }}
           >
             <SelectTrigger className="w-[160px] h-9">
@@ -494,8 +507,20 @@ export default function AnalyticsPage() {
 
         <Toaster ref={toasterRef} defaultPosition="top-right" />
 
+        {/* Antigravity / Kiro 视图切换：渠道侧用量 vs 本系统 usage_logs */}
+        {(activeTab === 'antigravity' || activeTab === 'kiro') && (
+          <div className="mb-6 flex justify-end">
+            <Tabs value={viewMode} onValueChange={(value) => setViewMode(value as 'channel' | 'requests')}>
+              <TabsList className="grid w-[240px] grid-cols-2">
+                <TabsTrigger value="requests">本系统日志</TabsTrigger>
+                <TabsTrigger value="channel">渠道用量</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+        )}
+
         {/* 反重力配额列表 */}
-        {activeTab === 'antigravity' && (
+        {activeTab === 'antigravity' && viewMode === 'channel' && (
           <Card className="mb-6">
             <CardHeader>
               <CardTitle>模型配额</CardTitle>
@@ -560,7 +585,7 @@ export default function AnalyticsPage() {
         )}
 
         {/* 反重力使用记录 */}
-        {activeTab === 'antigravity' && (
+        {activeTab === 'antigravity' && viewMode === 'channel' && (
           <Card>
             <CardHeader>
               <CardTitle>使用记录</CardTitle>
@@ -671,7 +696,7 @@ export default function AnalyticsPage() {
         )}
 
         {/* 请求统计（本系统记录 / usage_logs） */}
-        {(activeTab === 'antigravity' || activeTab === 'kiro' || activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && (
+        {(activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image' || viewMode === 'requests') && (
           <>
             <Card className="mb-6">
               <CardHeader>
@@ -939,7 +964,7 @@ export default function AnalyticsPage() {
         )}
 
         {/* Kiro 消费统计 */}
-        {activeTab === 'kiro' && (
+        {activeTab === 'kiro' && viewMode === 'channel' && (
           <>
             {/* 总体统计 */}
             <Card className="mb-6">
