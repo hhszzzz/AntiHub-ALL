@@ -3,6 +3,7 @@
 使用 pydantic-settings 从环境变量加载配置
 """
 from typing import Optional
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
