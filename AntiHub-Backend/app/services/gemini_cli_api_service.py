@@ -332,12 +332,38 @@ def _extract_usage_from_gemini_response(response_obj: Dict[str, Any]) -> Tuple[i
     """
     usage = response_obj.get("usageMetadata")
     if not isinstance(usage, dict):
+        usage = response_obj.get("cpaUsageMetadata")
+    if not isinstance(usage, dict):
+        usage = response_obj.get("usage_metadata")
+    if not isinstance(usage, dict):
+        usage = response_obj.get("cpa_usage_metadata")
+    if not isinstance(usage, dict):
         return 0, 0, 0, 0
 
-    prompt = int(usage.get("promptTokenCount") or 0)
-    completion = int(usage.get("candidatesTokenCount") or 0)
-    total = int(usage.get("totalTokenCount") or (prompt + completion))
-    thoughts = int(usage.get("thoughtsTokenCount") or 0)
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    # cachedContentTokenCount：部分上游会返回“命中缓存”的 prompt token（不应重复计入 prompt_tokens）
+    cached = _to_int(usage.get("cachedContentTokenCount") or usage.get("cached_content_token_count"))
+    if cached < 0:
+        cached = 0
+
+    prompt_raw = _to_int(usage.get("promptTokenCount") or usage.get("prompt_token_count"))
+    prompt = prompt_raw - cached
+    if prompt < 0:
+        prompt = 0
+
+    completion = _to_int(usage.get("candidatesTokenCount") or usage.get("candidates_token_count"))
+    thoughts = _to_int(usage.get("thoughtsTokenCount") or usage.get("thoughts_token_count"))
+
+    total_val = usage.get("totalTokenCount") if usage.get("totalTokenCount") is not None else usage.get("total_token_count")
+    if total_val is not None:
+        total = _to_int(total_val)
+    else:
+        total = prompt + completion + thoughts
 
     return prompt + thoughts, completion, total, thoughts
 

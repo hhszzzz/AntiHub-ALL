@@ -61,7 +61,8 @@ ANTIGRAVITY_OAUTH_CLIENT_SECRET = os.getenv(
 )
 ANTIGRAVITY_OAUTH_REDIRECT_URI = os.getenv(
     "ANTIGRAVITY_OAUTH_REDIRECT_URI",
-    "http://localhost:42532/oauth-callback",
+    # 对齐参考项目 CLIProxyAPIPlus 默认回调端口（同时也更可能在 Google OAuth 客户端里已登记）
+    "http://localhost:51121/oauth-callback",
 )
 ANTIGRAVITY_OAUTH_SCOPE = os.getenv(
     "ANTIGRAVITY_OAUTH_SCOPE",
@@ -77,6 +78,7 @@ ANTIGRAVITY_OAUTH_STATE_KEY_PREFIX = "antigravity_oauth:"
 # Cloudcode-pa（推理/模型列表）
 # 说明：plugin 默认优先 daily sandbox；这里按相同优先级做 best-effort fallback
 ANTIGRAVITY_CLOUDCODE_PA_ENDPOINTS = [
+    ("https://daily-cloudcode-pa.googleapis.com/v1internal", "daily-cloudcode-pa.googleapis.com"),
     ("https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal", "daily-cloudcode-pa.sandbox.googleapis.com"),
     ("https://cloudcode-pa.googleapis.com/v1internal", "cloudcode-pa.googleapis.com"),
     ("https://autopush-cloudcode-pa.sandbox.googleapis.com/v1internal", "autopush-cloudcode-pa.sandbox.googleapis.com"),
@@ -207,6 +209,9 @@ class PluginAPIService:
         if "://" not in candidate:
             if candidate.startswith("?"):
                 candidate = "http://localhost" + candidate
+            elif any(ch in candidate for ch in "/?#") or ":" in candidate:
+                # 兼容：localhost:51121/oauth-callback?code=...&state=...
+                candidate = "http://" + candidate
             elif "=" in candidate:
                 candidate = "http://localhost/?" + candidate
             else:
@@ -215,19 +220,133 @@ class PluginAPIService:
         parsed = urlparse(candidate)
         q = parse_qs(parsed.query)
 
-        code = (q.get("code", [""])[0] or "").strip()
-        state = (q.get("state", [""])[0] or "").strip()
-        err = (q.get("error", [""])[0] or "").strip()
-        err_desc = (q.get("error_description", [""])[0] or "").strip()
+        def _first(qs: Dict[str, List[str]], key: str) -> str:
+            try:
+                return (qs.get(key, [""])[0] or "").strip()
+            except Exception:
+                return ""
+
+        code = _first(q, "code")
+        state = _first(q, "state")
+        err = _first(q, "error")
+        err_desc = _first(q, "error_description")
+
+        # 有些 OAuth 变体会把参数放在 fragment（#）里（best-effort）
+        if parsed.fragment:
+            try:
+                fq = parse_qs(parsed.fragment)
+            except Exception:
+                fq = {}
+            if not code:
+                code = _first(fq, "code")
+            if not state:
+                state = _first(fq, "state")
+            if not err:
+                err = _first(fq, "error")
+            if not err_desc:
+                err_desc = _first(fq, "error_description")
+
+        # 极端情况兼容：code 里带了 #state
+        if code and not state and "#" in code:
+            left, right = code.split("#", 1)
+            code = left.strip()
+            state = right.strip()
+
         if not err and err_desc:
             err = err_desc
 
         if err:
             raise ValueError(f"OAuth授权失败: {err}")
-        if not code or not state:
-            raise ValueError("回调URL中缺少code或state参数")
+        if not code:
+            raise ValueError("回调URL中缺少code参数")
+        if not state:
+            raise ValueError("回调URL中缺少state参数")
 
         return {"code": code, "state": state}
+
+    def _antigravity_should_retry_no_capacity(self, status_code: int, body_text: str) -> bool:
+        """
+        对齐参考项目 CLIProxyAPIPlus 的 no-capacity 重试逻辑：
+        - 503 + "no capacity available" => 可尝试切换 base_url / 重试
+        """
+        if int(status_code) != 503:
+            return False
+        msg = (body_text or "").lower()
+        return "no capacity available" in msg
+
+    def _antigravity_fallback_project_id(self) -> str:
+        # 参考项目会在 project_id 缺失时生成一个随机 project 字符串（legacy best-effort）。
+        return f"ag-proj-{uuid4().hex[:8]}"
+
+    def _antigravity_stable_session_id(self, payload: Dict[str, Any]) -> str:
+        """
+        参考项目会尽量生成一个“稳定”的 sessionId（基于首个 user 文本 hash），用于减少上游侧的奇怪行为。
+        """
+        try:
+            req = payload.get("request") if isinstance(payload, dict) else None
+            contents = req.get("contents") if isinstance(req, dict) else None
+            if isinstance(contents, list):
+                for content in contents:
+                    if not isinstance(content, dict):
+                        continue
+                    if content.get("role") != "user":
+                        continue
+                    parts = content.get("parts")
+                    if not isinstance(parts, list) or not parts:
+                        continue
+                    first_part = parts[0]
+                    if not isinstance(first_part, dict):
+                        continue
+                    text = first_part.get("text")
+                    if isinstance(text, str) and text:
+                        h = hashlib.sha256(text.encode("utf-8")).digest()
+                        n = int.from_bytes(h[:8], "big") & 0x7FFFFFFFFFFFFFFF
+                        return f"-{n}"
+        except Exception:
+            pass
+
+        n = secrets.randbelow(9_000_000_000_000_000_000)
+        return f"-{n}"
+
+    def _apply_antigravity_request_defaults(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Antigravity / cloudcode-pa 的请求体在历史上存在一些“隐式约定”，参考 CLIProxyAPIPlus 做 best-effort 对齐：
+        - 顶层补齐 userAgent/requestType/requestId
+        - request.sessionId（尽量稳定）
+        - 去掉 request.safetySettings（避免部分上游差异/校验）
+        """
+        if not isinstance(payload, dict):
+            return {}
+
+        # project 为空时给一个 best-effort fallback，避免上游直接 400
+        project = payload.get("project")
+        if not isinstance(project, str) or not project.strip():
+            payload["project"] = self._antigravity_fallback_project_id()
+
+        req_obj = payload.get("request")
+        if not isinstance(req_obj, dict):
+            req_obj = {}
+            payload["request"] = req_obj
+
+        # Antigravity executor 侧会删掉 safetySettings，这里也保持一致
+        req_obj.pop("safetySettings", None)
+
+        # 兼容 toolConfig 的根/子路径差异（best-effort）
+        if "toolConfig" in payload and "toolConfig" not in req_obj:
+            req_obj["toolConfig"] = payload.pop("toolConfig")
+
+        payload.setdefault("userAgent", "antigravity")
+        payload.setdefault("requestType", "agent")
+
+        rid = payload.get("requestId")
+        if not isinstance(rid, str) or not rid.strip():
+            payload["requestId"] = f"agent-{uuid4().hex}"
+
+        sid = req_obj.get("sessionId")
+        if not isinstance(sid, str) or not sid.strip():
+            req_obj["sessionId"] = self._antigravity_stable_session_id(payload)
+
+        return payload
 
     async def _exchange_code_for_token(self, *, code: str) -> Dict[str, Any]:
         data = {
@@ -738,21 +857,44 @@ class PluginAPIService:
         payload["project"] = project_id
         model = (payload.get("model") or "").strip() or "gemini-2.5-pro"
 
-        url = f"{ANTIGRAVITY_CLOUDCODE_PA_ENDPOINTS[0][0]}:generateContent"
-        host = ANTIGRAVITY_CLOUDCODE_PA_ENDPOINTS[0][1]
+        req_body = self._apply_antigravity_request_defaults({**payload, "model": model})
 
+        last_err: Optional[Exception] = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(1200.0, connect=60.0)) as client:
-            resp = await client.post(
-                url,
-                headers=self._infer_headers(access_token=access_token, host=host, accept="application/json"),
-                json={**payload, "model": model},
-            )
-            if resp.status_code >= 400:
-                raise ValueError(resp.text[:2000] or f"Antigravity 上游错误: HTTP {resp.status_code}")
-            raw = resp.json()
-            if not isinstance(raw, dict):
-                raise ValueError("Antigravity 上游响应格式异常（非对象）")
-            return _gemini_cli_response_to_openai_response(raw)
+            for base_url, host in ANTIGRAVITY_CLOUDCODE_PA_ENDPOINTS:
+                url = f"{base_url}:generateContent"
+                try:
+                    resp = await client.post(
+                        url,
+                        headers=self._infer_headers(access_token=access_token, host=host, accept="application/json"),
+                        json=req_body,
+                    )
+                except Exception as e:
+                    last_err = e
+                    continue
+
+                if resp.status_code >= 400:
+                    msg = (resp.text or "").strip()
+                    if len(msg) > 2000:
+                        msg = msg[:2000]
+                    last_err = ValueError(msg or f"Antigravity 上游错误: HTTP {resp.status_code}")
+                    if resp.status_code == 429 or self._antigravity_should_retry_no_capacity(resp.status_code, msg):
+                        continue
+                    raise ValueError(msg or f"Antigravity 上游错误: HTTP {resp.status_code}")
+
+                try:
+                    raw = resp.json()
+                except Exception as e:
+                    last_err = e
+                    continue
+
+                if not isinstance(raw, dict):
+                    last_err = ValueError("Antigravity 上游响应格式异常（非对象）")
+                    continue
+
+                return _gemini_cli_response_to_openai_response(raw)
+
+        raise ValueError(str(last_err or "Antigravity 上游错误"))
 
     async def _antigravity_openai_chat_completions_stream(self, *, user_id: int, request_data: Dict[str, Any]):
         result = await self.db.execute(
@@ -772,56 +914,75 @@ class PluginAPIService:
         payload["project"] = project_id
         model = (payload.get("model") or "").strip() or "gemini-2.5-pro"
 
-        base_url, host = ANTIGRAVITY_CLOUDCODE_PA_ENDPOINTS[0]
-        url = f"{base_url}:streamGenerateContent?alt=sse"
+        req_body = self._apply_antigravity_request_defaults({**payload, "model": model})
         state = _OpenAIStreamState(created=int(time.time()), function_index=0)
 
+        last_status: Optional[int] = None
+        last_msg: str = ""
+
         async with httpx.AsyncClient(timeout=httpx.Timeout(1200.0, connect=60.0)) as client:
-            async with client.stream(
-                "POST",
-                url,
-                headers=self._infer_headers(access_token=access_token, host=host, accept="text/event-stream"),
-                json={**payload, "model": model},
-            ) as resp:
-                if resp.status_code >= 400:
-                    text = await resp.aread()
-                    msg = text.decode("utf-8", errors="replace")[:2000]
-                    yield _openai_error_sse(msg or "Antigravity 上游错误", code=resp.status_code)
-                    yield _openai_done_sse()
-                    return
-
-                buffer = b""
-                event_data_lines: List[bytes] = []
-                async for chunk in resp.aiter_raw():
-                    if not chunk:
-                        continue
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        line = line.rstrip(b"\r")
-
-                        if line == b"":
-                            if not event_data_lines:
+            for base_url, host in ANTIGRAVITY_CLOUDCODE_PA_ENDPOINTS:
+                url = f"{base_url}:streamGenerateContent?alt=sse"
+                try:
+                    async with client.stream(
+                        "POST",
+                        url,
+                        headers=self._infer_headers(access_token=access_token, host=host, accept="text/event-stream"),
+                        json=req_body,
+                    ) as resp:
+                        if resp.status_code >= 400:
+                            text = await resp.aread()
+                            msg = text.decode("utf-8", errors="replace").strip()
+                            if len(msg) > 2000:
+                                msg = msg[:2000]
+                            last_status = resp.status_code
+                            last_msg = msg or f"Antigravity 上游错误: HTTP {resp.status_code}"
+                            if resp.status_code == 429 or self._antigravity_should_retry_no_capacity(resp.status_code, last_msg):
                                 continue
-                            data = b"\n".join(event_data_lines).strip()
-                            event_data_lines = []
-                            if not data:
-                                continue
-                            try:
-                                event_obj = json.loads(data.decode("utf-8", errors="replace"))
-                            except Exception:
-                                continue
-                            if not isinstance(event_obj, dict):
-                                continue
-                            for payload_obj in _gemini_cli_event_to_openai_chunks(event_obj, state=state):
-                                yield f"data: {json.dumps(payload_obj, ensure_ascii=False)}\n\n".encode("utf-8")
-                            continue
+                            yield _openai_error_sse(last_msg or "Antigravity 上游错误", code=resp.status_code)
+                            yield _openai_done_sse()
+                            return
 
-                        if line.startswith(b"data:"):
-                            event_data_lines.append(line[5:].lstrip())
-                            continue
+                        buffer = b""
+                        event_data_lines: List[bytes] = []
+                        async for chunk in resp.aiter_raw():
+                            if not chunk:
+                                continue
+                            buffer += chunk
+                            while b"\n" in buffer:
+                                line, buffer = buffer.split(b"\n", 1)
+                                line = line.rstrip(b"\r")
 
-                yield _openai_done_sse()
+                                if line == b"":
+                                    if not event_data_lines:
+                                        continue
+                                    data = b"\n".join(event_data_lines).strip()
+                                    event_data_lines = []
+                                    if not data:
+                                        continue
+                                    try:
+                                        event_obj = json.loads(data.decode("utf-8", errors="replace"))
+                                    except Exception:
+                                        continue
+                                    if not isinstance(event_obj, dict):
+                                        continue
+                                    for payload_obj in _gemini_cli_event_to_openai_chunks(event_obj, state=state):
+                                        yield f"data: {json.dumps(payload_obj, ensure_ascii=False)}\n\n".encode("utf-8")
+                                    continue
+
+                                if line.startswith(b"data:"):
+                                    event_data_lines.append(line[5:].lstrip())
+                                    continue
+
+                        yield _openai_done_sse()
+                        return
+                except Exception as e:
+                    last_status = last_status or 500
+                    last_msg = str(e)
+                    continue
+
+        yield _openai_error_sse(last_msg or "Antigravity 上游错误", code=int(last_status or 500))
+        yield _openai_done_sse()
 
     async def openai_chat_completions_stream(self, *, user_id: int, request_data: Dict[str, Any]):
         """
